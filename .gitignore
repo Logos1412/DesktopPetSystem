@@ -1,0 +1,21 @@
+# Local archives & tooling logs — do not push to GitHub
+*.zip
+encoding_convert_log*
+
+.vs/
+**/.vs/
+**/x64/
+**/Debug/
+**/Release/
+**/qt/
+**/*.tlog
+**/*.obj
+**/*.pdb
+**/*.ilk
+**/*.idb
+**/*.recipe
+**/*.log
+**/moc_*.cpp
+**/ui_*.h
+**/qrc_*.cpp
+resources/save/chat_input.json
