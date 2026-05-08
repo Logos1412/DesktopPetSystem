@@ -5,7 +5,35 @@
 #include "PetAttribute.h"
 #include "PetConfig.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QRandomGenerator>
+#include <QStringList>
 #include <QDebug>
+
+namespace {
+QString projectRootPath()
+{
+    QString appDir = QCoreApplication::applicationDirPath();
+    QDir dir(appDir);
+    dir.cdUp();
+    dir.cdUp();
+    return dir.absolutePath();
+}
+
+QString pickRandomIdleDoubleClickRelativePath()
+{
+    const QString dirPath = QDir(projectRootPath()).absoluteFilePath(QStringLiteral("resources/animations/Idle/double_click"));
+    QDir d(dirPath);
+    const QStringList files = d.entryList(QStringList() << QStringLiteral("*.gif"), QDir::Files, QDir::Name);
+    if (files.isEmpty()) {
+        qWarning() << "[待机双击] Idle/double_click 下无 gif，使用 Idle/Idle.gif";
+        return QStringLiteral("Idle/Idle.gif");
+    }
+    const int i = QRandomGenerator::global()->bounded(files.size());
+    return QStringLiteral("Idle/double_click/") + files.at(i);
+}
+}
 
 // 进入正常待机状态
 void PetStateIdle::enter()
@@ -55,8 +83,9 @@ void PetStateIdle::exit()
 // 双击交互
 void PetStateIdle::onDoubleClick()
 {
-    qDebug() << "[双击] 正常待机 - 播放开心动画";
-    emit requestPlayAnimation("idle/happy.gif", false);
+    const QString rel = pickRandomIdleDoubleClickRelativePath();
+    qDebug() << "[双击] 正常待机 - 随机特殊动画:" << rel;
+    emit requestPlayAnimation(rel, false, true);
 }
 
 // 状态切换检查

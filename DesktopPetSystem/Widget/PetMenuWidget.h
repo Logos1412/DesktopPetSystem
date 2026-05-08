@@ -2,6 +2,7 @@
 #pragma execution_character_set("utf-8")
 
 #include <QWidget>
+#include <QRect>
 #include <QFocusEvent>
 #include <QMap>
 #include <QString>
@@ -43,12 +44,18 @@ class PetMenuWidget : public QWidget
 
 public:
     PetMenuWidget(PetFSM* fsm, PetAttribute* attr, PetController* controller, QWidget* parent = nullptr);
-    void showAtPos(const QPoint& petPos);
-    void toggleMenu(const QPoint& petPos);
+    /** petGlobalRect：宠物窗口在屏幕上的外接矩形（用于把横条菜单放在宠物正下方并居中） */
+    void showAtPetRect(const QRect& petGlobalRect);
+    void toggleMenu(const QRect& petGlobalRect);
+    void refreshFoodsFromConfig();
 
 signals:
     /** 用户选择将属性恢复为配置文件默认值（等同首次启动存档） */
     void firstLaunchResetRequested();
+    void changeWallpaperRequested();
+    void exportSaveRequested();
+    void importSaveRequested();
+    void openSettingsRequested();
 
 private:
     void initMenuStyle();

@@ -1,0 +1,156 @@
+{
+    "animation_scales": {
+        "AbnormalIdle/AbnormalIdle.gif": 1,
+        "AbnormalIdle/double_click/Hungry.gif": 1,
+        "AbnormalIdle/double_click/Sad.gif": 1,
+        "AbnormalIdle/double_click/Sleepy.gif": 1,
+        "Chat/Chat.gif": 1,
+        "Eat/Eat.gif": 1,
+        "Idle/Idle.gif": 1,
+        "Idle/double_click/Angry.gif": 1,
+        "Idle/double_click/Laugh.gif": 1,
+        "Idle/double_click/Shy.gif": 1,
+        "Move/Move_L.gif": 1,
+        "Move/Move_R.gif": 1,
+        "Play/Play.gif": 1,
+        "Sleep/Sleep.gif": 1,
+        "Sleep/Sleeping.gif": 1,
+        "Study/Study.gif": 1,
+        "Work/Work.gif": 1
+    },
+    "attributes": {
+        "default_energy": 60,
+        "default_exp": 0,
+        "default_hunger": 50,
+        "default_level": 1,
+        "default_mood": 70,
+        "energy_decay_abnormal": 12,
+        "energy_decay_idle": 6,
+        "hunger_decay_abnormal": 12,
+        "hunger_decay_idle": 6,
+        "mood_decay_abnormal": 12,
+        "mood_decay_idle": 6
+    },
+    "chat": {
+        "energy_cost_per_round": 1,
+        "hunger_cost_per_round": 1,
+        "mood_gain_per_round": 2
+    },
+    "chat_runtime": {
+        "api_base": "",
+        "api_key": "",
+        "api_key_env": "",
+        "context_turns": 6,
+        "max_context_chars": 8000,
+        "max_input_chars": 800,
+        "context_reserve_chars": 2000,
+        "max_history_estimated_tokens": 0,
+        "context_chars_per_est_token": 3,
+        "summary_compress_after_memory_chars": 2800,
+        "reply_no_stage_directions": true,
+        "max_reply_tokens": 1024,
+        "memory_avoid_max_chars": 80,
+        "memory_facts_max_chars": 120,
+        "memory_path": "resources/save/chat_memory.json",
+        "memory_preferences_max_chars": 120,
+        "memory_tasks_max_chars": 120,
+        "model": "llama3.1:8b",
+        "ollama_host": "http://127.0.0.1:11434",
+        "pet_persona": "",
+        "provider": "ollama",
+        "python_path": "python3",
+        "script_path": "resources/scripts/chat_ai.py",
+        "summary_compress_after_turns": 12,
+        "summary_enabled": true,
+        "summary_keep_recent_turns": 8,
+        "summary_max_chars": 400
+    },
+    "foods": {
+        "cola": {
+            "energy": 10,
+            "exp": 10,
+            "hunger": 10,
+            "mood": 30,
+            "name": "可乐",
+            "price": 10
+        },
+        "chocolate": {
+            "energy": 30,
+            "exp": 10,
+            "hunger": 10,
+            "mood": 10,
+            "name": "巧克力",
+            "price": 20
+        },
+        "burger": {
+            "energy": 10,
+            "exp": 10,
+            "hunger": 30,
+            "mood": 10,
+            "name": "汉堡",
+            "price": 30
+        },
+        "tonic_soup": {
+            "energy": 50,
+            "exp": 50,
+            "hunger": 50,
+            "mood": 50,
+            "name": "大补汤",
+            "price": 50
+        }
+    },
+    "interaction": {
+        "double_click_cooldown_ms": 10000,
+        "double_click_mood_delta_idle": 2,
+        "double_click_mood_delta_abnormal": 1
+    },
+    "limits": {
+        "max_value": 100,
+        "min_value": 0
+    },
+    "logging": {
+        "verbose_state_logs": false
+    },
+    "movement": {
+        "direction_keep_rate": 80,
+        "idle_timeout": 5000,
+        "move_speed": 2,
+        "update_interval": 33
+    },
+    "play": {
+        "energy_decay_per_minute": 12,
+        "exp_gain_per_minute": 120,
+        "hunger_decay_per_minute": 12,
+        "mood_increase_per_minute": 12
+    },
+    "progression": {
+        "exp_base": 100,
+        "exp_growth": 20
+    },
+    "sleep": {
+        "energy_recovery_per_minute": 12,
+        "hunger_decay_per_minute": 3
+    },
+    "study": {
+        "energy_decay_per_minute": 12,
+        "exp_gain_per_minute": 18,
+        "hunger_decay_per_minute": 12,
+        "mood_decay_per_minute": 12
+    },
+    "thresholds": {
+        "abnormal": 20,
+        "auto_sleep_energy": 5,
+        "recovery": 20
+    },
+    "window": {
+        "height": 250,
+        "width": 250
+    },
+    "work": {
+        "coin_gain_per_minute": 18,
+        "energy_decay_per_minute": 12,
+        "exp_gain_per_minute": 18,
+        "hunger_decay_per_minute": 12,
+        "mood_decay_per_minute": 12
+    }
+}

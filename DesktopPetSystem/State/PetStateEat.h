@@ -22,9 +22,6 @@ public:
     void setFood(const QString& foodId);
     void setFood(const FoodData& food);
 
-private slots:
-    void finishEating();
-
 private:
     FoodData m_currentFood;
     bool m_hasFood = false;

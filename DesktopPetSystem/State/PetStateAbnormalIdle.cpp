@@ -62,15 +62,15 @@ void PetStateAbnormalIdle::onDoubleClick()
     switch (reason) {
     case AbnormalReason::Hungry:
         qDebug() << "[双击] 异常待机 - 饥饿动画";
-        animationPath = "AbnormalIdle/hungry.gif";
+        animationPath = "AbnormalIdle/double_click/Hungry.gif";
         break;
     case AbnormalReason::Sleepy:
         qDebug() << "[双击] 异常待机 - 困倦动画";
-        animationPath = "AbnormalIdle/sleepy.gif";
+        animationPath = "AbnormalIdle/double_click/Sleepy.gif";
         break;
     case AbnormalReason::Sad:
         qDebug() << "[双击] 异常待机 - 悲伤动画";
-        animationPath = "AbnormalIdle/sad.gif";
+        animationPath = "AbnormalIdle/double_click/Sad.gif";
         break;
     default:
         qDebug() << "[双击] 异常待机 - 默认动画";
@@ -78,7 +78,7 @@ void PetStateAbnormalIdle::onDoubleClick()
         break;
     }
 
-    emit requestPlayAnimation(animationPath);
+    emit requestPlayAnimation(animationPath, false, true);
 }
 
 // 获取最低属性

@@ -23,6 +23,9 @@ public:
     // 双击交互
     void onDoubleClick() override;
 
+    /** 入睡过渡 GIF 播完一轮后由 PetFSM / PetWidget 触发 */
+    void onFallAsleepIntroFinished();
+
 private:
     int m_sleepCount = 0;          // 睡眠计数
     bool m_isSleeping = false;     // 是否已切换到睡眠中循环动画（仅展示）

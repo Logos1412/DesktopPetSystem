@@ -19,6 +19,8 @@ public:
     explicit FoodSelectWidget(PetAttribute* attr, QWidget* parent = nullptr);
 
     void showAtPos(const QPoint& pos);
+    /** pet_config 热更新后重建食物列表 */
+    void rebuildFoodListFromConfig();
     /** 进食结算与 5s 展示期间为 true：购买按钮置灰 */
     void setFeedingInProgress(bool busy);
 

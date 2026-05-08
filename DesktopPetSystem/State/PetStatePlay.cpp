@@ -43,7 +43,9 @@ void PetStatePlay::update()
     maybeLogMinuteSettlement(QStringLiteral("玩耍"),
                              -m_config->getPlayHungerDecayPerMinute(),
                              -m_config->getPlayEnergyDecayPerMinute(),
-                             m_config->getPlayMoodIncreasePerMinute());
+                             m_config->getPlayMoodIncreasePerMinute(),
+                             m_config->getPlayExpGainPerMinute(),
+                             0);
 }
 
 // 退出玩耍状态

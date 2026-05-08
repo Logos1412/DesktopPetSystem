@@ -19,7 +19,8 @@ public:
 	void changeHunger(int delta);
 	void changeMood(int delta);
 	void changeEnergy(int delta);
-	void addExp(int exp);
+	/** outLevelsGained 非空时写入本次因加经验而提升的等级数（可能 >1） */
+	void addExp(int exp, int* outLevelsGained = nullptr);
 	void changeCoin(int delta);
 
 	int getHunger() const { return m_hunger; }
@@ -28,6 +29,9 @@ public:
 	int getLevel() const { return m_level; }
 	int getExp() const { return m_exp; }
 	int getCoin() const { return m_coin;}
+
+	/** 由存档加载等非 setter 路径触发界面刷新 */
+	void notifyAttributeChanged() { emit attributeChanged(); }
 
 signals:
 	void attributeChanged();

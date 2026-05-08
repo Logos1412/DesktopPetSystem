@@ -30,13 +30,19 @@ public:
     // 双击事件
     void onDoubleClick();
 
+    /** 进食 GIF 播完一轮后由界面调用 */
+    void notifyEatAnimationFinished();
+    /** 入睡第一段 GIF 播完一轮后由界面调用 */
+    void notifySleepFallAsleepFinished();
+
 signals:
     // 状态改变信号
     void stateChanged(PetStateType state);
     // 状态切换完成信号（用于保存数据）
     void stateTransition();
     // 播放动画信号
-    void playAnimation(const QString& animationPath, bool isStateAnimation = true);
+    void playAnimation(const QString& animationPath, bool isStateAnimation = true, bool playOnce = false);
+
     // 聊天相关信号
     void showChatWidget();
     void showChatReply(const QString& reply);

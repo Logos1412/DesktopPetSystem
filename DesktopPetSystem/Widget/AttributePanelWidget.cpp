@@ -16,7 +16,7 @@ AttributePanelWidget::AttributePanelWidget(PetAttribute* attr, QWidget* parent)
 void AttributePanelWidget::initStyle()
 {
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
-    setFixedSize(280, 220);
+    setFixedWidth(280);
     setMouseTracking(true);
 
     setStyleSheet(
@@ -94,9 +94,9 @@ void AttributePanelWidget::initUI()
     createAttrRow(u8"精力", m_energyBar, m_energyValue, "#4CAF50");
     createAttrRow(u8"心情", m_moodBar, m_moodValue, "#E91E63");
 
-    mainLayout->addStretch();
-
     refreshData();
+    adjustSize();
+    setFixedHeight(height());
 }
 
 void AttributePanelWidget::showAtPos(const QPoint& pos)

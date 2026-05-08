@@ -17,8 +17,8 @@ void PetStateSleep::enter()
     m_remSleepEnergy = 0;
     m_remSleepHunger = 0;
 
-    // 先播放入睡动画
-    emit requestPlayAnimation("sleep/sleep.gif", true);
+    // 先播放入睡动画（一轮结束后切到睡眠中循环）
+    emit requestPlayAnimation("Sleep/Sleep.gif", true, true);
 
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateSleep::update);
     connect(m_updateTimer, &QTimer::timeout, this, &PetStateSleep::update);
@@ -33,18 +33,10 @@ void PetStateSleep::update()
     }
 
     // 获取配置
-    int transitionDelay = m_config->getSleepTransitionDelay();
     const int energyRecoveryRate = m_config->getSleepEnergyRecoveryPerMinute();
     const int hungerDecayRate = m_config->getSleepHungerDecayPerMinute();
 
-    m_sleepCount++;
-
-    // 入睡过渡仅用于切换展示动画；属性从进入睡眠状态起每秒结算，不与动画绑定
-    if (!m_isSleeping && m_sleepCount >= transitionDelay) {
-        m_isSleeping = true;
-        emit requestPlayAnimation("sleep/sleeping.gif", true);
-        qDebug() << "[睡眠] 切换到睡眠中动画";
-    }
+    ++m_sleepCount;
 
     m_attr->changeEnergy(slicePerSecondFromRatePerMinute(energyRecoveryRate, m_remSleepEnergy));
     m_attr->changeHunger(-slicePerSecondFromRatePerMinute(hungerDecayRate, m_remSleepHunger));
@@ -58,6 +50,8 @@ void PetStateSleep::update()
     maybeLogMinuteSettlement(QStringLiteral("睡眠"),
                              -m_config->getSleepHungerDecayPerMinute(),
                              m_config->getSleepEnergyRecoveryPerMinute(),
+                             0,
+                             0,
                              0);
 }
 
@@ -69,6 +63,15 @@ void PetStateSleep::exit()
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateSleep::update);
     m_sleepCount = 0;
     m_isSleeping = false;
+}
+
+void PetStateSleep::onFallAsleepIntroFinished()
+{
+    if (m_isSleeping)
+        return;
+    m_isSleeping = true;
+    emit requestPlayAnimation("Sleep/Sleeping.gif", true, false);
+    qDebug() << "[睡眠] 切换到睡眠中动画";
 }
 
 // 双击交互

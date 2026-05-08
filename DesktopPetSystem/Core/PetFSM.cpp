@@ -118,6 +118,22 @@ void PetFSM::onDoubleClick()
     }
 }
 
+void PetFSM::notifyEatAnimationFinished()
+{
+    if (m_currentStateType != PetStateType::Eat)
+        return;
+    changeState(PetStateType::Idle);
+}
+
+void PetFSM::notifySleepFallAsleepFinished()
+{
+    if (m_currentStateType != PetStateType::Sleep)
+        return;
+    PetStateSleep* sleepState = qobject_cast<PetStateSleep*>(m_currentState);
+    if (sleepState)
+        sleepState->onFallAsleepIntroFinished();
+}
+
 // 检查是否需要切换到异常待机
 AbnormalReason PetFSM::checkAbnormal()
 {

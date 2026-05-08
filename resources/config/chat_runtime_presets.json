@@ -1,0 +1,59 @@
+{
+    "comment": "聊天服务页「档位预设」：仅用于一键填入建议数值；不影响 provider / model / api_key。可按需自行编辑。",
+    "presets": [
+        {
+            "id": "tier_beginner_local_llama31_8b",
+            "title": "初级 · 本地小模型（参考 Llama 3.1 8B）",
+            "hint": "适合本机 Ollama 小显存；上下文与摘要偏保守，更早压缩历史。",
+            "values": {
+                "context_turns": 6,
+                "max_context_chars": 4800,
+                "max_reply_tokens": 768,
+                "max_input_chars": 600,
+                "summary_compress_after_turns": 10,
+                "summary_keep_recent_turns": 6,
+                "summary_max_chars": 280,
+                "memory_preferences_max_chars": 72,
+                "memory_tasks_max_chars": 72,
+                "memory_avoid_max_chars": 56,
+                "memory_facts_max_chars": 72
+            }
+        },
+        {
+            "id": "tier_mid_qwen25_32b",
+            "title": "中级 · 均衡（参考 Qwen2.5-32B-Instruct）",
+            "hint": "性能与资源介于本地 8B 与云端大上下文之间；适合中端显卡或中等预算 API。",
+            "values": {
+                "context_turns": 10,
+                "max_context_chars": 11000,
+                "max_reply_tokens": 1536,
+                "max_input_chars": 900,
+                "summary_compress_after_turns": 15,
+                "summary_keep_recent_turns": 8,
+                "summary_max_chars": 400,
+                "memory_preferences_max_chars": 96,
+                "memory_tasks_max_chars": 96,
+                "memory_avoid_max_chars": 72,
+                "memory_facts_max_chars": 96
+            }
+        },
+        {
+            "id": "tier_advanced_deepseek_v4_flash",
+            "title": "高级 · 大上下文 API（参考 DeepSeek V4-Flash）",
+            "hint": "适合长上下文云端模型；可携带更长历史、较晚触发摘要（仍受厂商 token 与计费限制）。",
+            "values": {
+                "context_turns": 14,
+                "max_context_chars": 28000,
+                "max_reply_tokens": 2048,
+                "max_input_chars": 1200,
+                "summary_compress_after_turns": 22,
+                "summary_keep_recent_turns": 10,
+                "summary_max_chars": 560,
+                "memory_preferences_max_chars": 120,
+                "memory_tasks_max_chars": 120,
+                "memory_avoid_max_chars": 96,
+                "memory_facts_max_chars": 120
+            }
+        }
+    ]
+}

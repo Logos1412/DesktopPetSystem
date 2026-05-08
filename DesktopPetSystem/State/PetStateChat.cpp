@@ -4,6 +4,8 @@
 #include "PetFSM.h"
 #include "PetAttribute.h"
 #include "Config/PetConfig.h"
+#include <QStringList>
+
 #include <QDebug>
 #include <QProcessEnvironment>
 #include <QJsonDocument>
@@ -23,6 +25,8 @@
 #include <QNetworkRequest>
 #include <QTimer>
 #include <QUrl>
+#include <QtConcurrent/QtConcurrent>
+#include <QFutureWatcher>
 
 namespace {
 QString resolveProjectRootPath()
@@ -107,6 +111,107 @@ bool queryOllamaTagsOk(const QString& hostBase, QString* detailOut)
 }
 }
 
+/** 在后台线程中调用：跑 Python summarize_structured，返回 memory 对象 */
+static QJsonObject runStructuredSummarizeWorker(const QString& dialogueChunk,
+                                                const QJsonObject& existingMemory,
+                                                const QJsonObject& limits,
+                                                const QString& model,
+                                                const QString& ollamaHost,
+                                                const QString& provider,
+                                                const QString& apiBase,
+                                                const QString& apiKey,
+                                                const QString& apiKeyEnv,
+                                                const QString& scriptPathAbs,
+                                                const QString& pythonExecutable)
+{
+    if (!QFile::exists(scriptPathAbs)) {
+        return QJsonObject();
+    }
+
+    QJsonObject root;
+    root[QStringLiteral("mode")] = QStringLiteral("summarize_structured");
+    root[QStringLiteral("existing_memory")] = existingMemory;
+    root[QStringLiteral("dialogue_chunk")] = dialogueChunk;
+    root[QStringLiteral("memory_limits")] = limits;
+    root[QStringLiteral("model")] = model;
+    root[QStringLiteral("ollama_host")] = ollamaHost;
+    root[QStringLiteral("provider")] = provider;
+    root[QStringLiteral("api_base")] = apiBase;
+    root[QStringLiteral("api_key")] = apiKey;
+    root[QStringLiteral("api_key_env")] = apiKeyEnv;
+
+    const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
+
+    QString py = pythonExecutable.trimmed();
+    if (py.isEmpty()) {
+        py = QStringLiteral("python3");
+    }
+    const QStringList args = {scriptPathAbs, QStringLiteral("--stdin-json")};
+
+    QProcess proc;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
+    env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
+    env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
+    proc.setProcessEnvironment(env);
+
+    proc.start(py, args);
+
+    QElapsedTimer startWait;
+    startWait.start();
+    while (!proc.waitForStarted(100)) {
+        if (proc.state() == QProcess::NotRunning) {
+            qWarning() << "[结构化摘要] Python 启动失败";
+            return QJsonObject();
+        }
+        if (startWait.elapsed() > 8000) {
+            proc.kill();
+            qWarning() << "[结构化摘要] Python 启动超时";
+            return QJsonObject();
+        }
+    }
+
+    proc.write(payload);
+    proc.closeWriteChannel();
+
+    QElapsedTimer runWait;
+    runWait.start();
+    while (!proc.waitForFinished(500)) {
+        if (runWait.elapsed() > 120000) {
+            proc.kill();
+            qWarning() << "[结构化摘要] 超时";
+            return QJsonObject();
+        }
+    }
+
+    const QByteArray out = proc.readAllStandardOutput();
+    const QList<QByteArray> lines = out.split('\n');
+    for (const QByteArray& raw : lines) {
+        const QByteArray line = raw.trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+        QJsonParseError err;
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+            continue;
+        }
+        const QJsonObject obj = doc.object();
+        if (obj.value(QStringLiteral("event")).toString() != QStringLiteral("done")) {
+            continue;
+        }
+        if (!obj.value(QStringLiteral("success")).toBool()) {
+            return QJsonObject();
+        }
+        const QJsonValue mv = obj.value(QStringLiteral("memory"));
+        if (!mv.isObject()) {
+            return QJsonObject();
+        }
+        return mv.toObject();
+    }
+    return QJsonObject();
+}
+
 PetStateChat::~PetStateChat()
 {
     if (m_process) {
@@ -119,21 +224,25 @@ void PetStateChat::enter()
 {
     qDebug() << "进入聊天状态";
 
-    QString errDetail;
-    if (!queryOllamaTagsOk(PetConfig::getInstance()->getChatOllamaHost(), &errDetail)) {
-        /* 先退回 Idle（避免未完成 enter）；提示用单次定时延后，绕过 changeState 重入期间的 UI 抖动 */
-        m_fsm->changeState(PetStateType::Idle);
-        const QString msg = QStringLiteral(
-                                "请先启动 Ollama，或检查配置文件中的 chat_runtime.ollama_host。\n\n")
-                            + errDetail.trimmed();
-        QTimer::singleShot(0, this, [this, msg]() { emit chatOllamaPrefetchFailed(msg); });
-        return;
+    PetConfig* cfg = PetConfig::getInstance();
+    /* 仅在使用本地 Ollama 时预检；云端 openai_compatible 不访问 11434 */
+    if (cfg->getChatProvider() == QStringLiteral("ollama")) {
+        QString errDetail;
+        if (!queryOllamaTagsOk(cfg->getChatOllamaHost(), &errDetail)) {
+            /* 先退回 Idle（避免未完成 enter）；提示用单次定时延后，绕过 changeState 重入期间的 UI 抖动 */
+            m_fsm->changeState(PetStateType::Idle);
+            const QString msg = QStringLiteral(
+                                    "请先启动 Ollama，或检查配置文件中的 chat_runtime.ollama_host。\n\n")
+                                + errDetail.trimmed();
+            QTimer::singleShot(0, this, [this, msg]() { emit chatOllamaPrefetchFailed(msg); });
+            return;
+        }
     }
 
     m_isChatting = false;
 
     emit showChatWidget();
-    emit requestPlayAnimation("chat/chat.gif", true);
+    emit requestPlayAnimation("Chat/Chat.gif", true);
     m_isChatting = true;
     loadChatMemory();
 }
@@ -150,6 +259,9 @@ void PetStateChat::exit()
 
     saveChatMemory();
 
+    /* 若仍在等 AI：杀掉子进程后不会再触发 onProcessFinished，须手动结束 UI 上的「生成中」 */
+    const bool interruptAi = m_waitingForAiResponse && !m_finalizeDone;
+
     if (m_process) {
         disconnect(m_process, nullptr, this, nullptr);
         m_process->kill();
@@ -159,10 +271,18 @@ void PetStateChat::exit()
 
     m_stdoutLineBuffer.clear();
     m_chatStdinPending.clear();
+
+    if (interruptAi) {
+        emit chatBusyChanged(false);
+        emit chatAssistantFinished(false, true, QString());
+    }
+
     m_waitingForAiResponse = false;
     m_aiAssistantBubbleShown = false;
     m_userCancelled = false;
     m_finalizeDone = false;
+    m_assistantStreamingBuffer.clear();
+    m_pendingDoneReply.clear();
 }
 
 void PetStateChat::finalizeAiReply(bool assistantBubbleWasShown,
@@ -200,23 +320,28 @@ void PetStateChat::finalizeAiReply(bool assistantBubbleWasShown,
         const int h0 = m_attr->getHunger();
         const int e0 = m_attr->getEnergy();
         const int m0 = m_attr->getMood();
+        const int exp0 = m_attr->getExp();
+        const int coin0 = m_attr->getCoin();
 
         m_attr->changeHunger(-costH);
         m_attr->changeEnergy(-costE);
         m_attr->changeMood(gainM);
 
-        qDebug() << "[结算]" << "聊天" << "| 一轮 |"
-                 << formatSettlementAttrDelta(QStringLiteral("饱食"), -costH)
-                 << formatSettlementAttrDelta(QStringLiteral("精力"), -costE)
-                 << formatSettlementAttrDelta(QStringLiteral("心情"), gainM)
-                 << "| 结算前" << h0 << e0 << m0 << QStringLiteral("→ 结算后")
-                 << m_attr->getHunger() << m_attr->getEnergy() << m_attr->getMood();
+        QStringList deltas;
+        deltas << formatSettlementAttrDelta(QStringLiteral("饱食"), -costH);
+        deltas << formatSettlementAttrDelta(QStringLiteral("精力"), -costE);
+        deltas << formatSettlementAttrDelta(QStringLiteral("心情"), gainM);
+
+        qDebug() << "[结算]" << QStringLiteral("聊天") << "| 一轮 |" << deltas.join(QStringLiteral(" "))
+                 << "| 结算前" << h0 << e0 << m0 << exp0 << coin0 << QStringLiteral("→ 结算后")
+                 << m_attr->getHunger() << m_attr->getEnergy() << m_attr->getMood() << m_attr->getExp()
+                 << m_attr->getCoin() << QStringLiteral("| 升级：") << 0;
 
         appendSuccessfulExchange(m_currentInput, assistantTextSaved);
         saveChatMemory();
     }
 
-    /* runSummarizeMerge 内含长时间 waitForFinished，只能在事件循环空闲时跑 */
+    /* 结构化摘要在线程池中运行，完成后 watcher 内 saveChatMemory */
     if (success && !userCancelled) {
         QTimer::singleShot(0, this, [this]() {
             tryCompressOldTurns();
@@ -372,6 +497,9 @@ void PetStateChat::onUserInput(const QString& input)
     m_pendingDoneReply.clear();
 
     PetConfig* config = PetConfig::getInstance();
+    /* 每次发送前从磁盘再读 chat_runtime，避免人设/API 与 pet_config.json 不一致（多份路径、仅改文件未热载等） */
+    config->reloadChatRuntimeFromFile();
+
     const QString projectRootPath = resolveProjectRootPath();
 
     QString scriptPath = config->getChatScriptPath();
@@ -404,12 +532,23 @@ void PetStateChat::onUserInput(const QString& input)
     QJsonObject inputJson;
     inputJson[QStringLiteral("input")] = input;
     inputJson[QStringLiteral("model")] = model;
-    inputJson[QStringLiteral("max_tokens")] = 150;
+    inputJson[QStringLiteral("max_tokens")] = config->getChatMaxReplyTokens();
+    inputJson[QStringLiteral("max_input_chars")] = config->getChatMaxInputChars();
     inputJson[QStringLiteral("temperature")] = 0.7;
     inputJson[QStringLiteral("pet_state")] = stateDesc;
     inputJson[QStringLiteral("ollama_host")] = config->getChatOllamaHost();
-    inputJson[QStringLiteral("conversation_summary")] = m_conversationSummary;
+    inputJson[QStringLiteral("provider")] = config->getChatProvider();
+    inputJson[QStringLiteral("api_base")] = config->getChatApiBase();
+    inputJson[QStringLiteral("api_key")] = config->getChatApiKey();
+    inputJson[QStringLiteral("api_key_env")] = config->getChatApiKeyEnv();
+    inputJson[QStringLiteral("pet_persona")] = config->getChatPetPersona();
+    inputJson[QStringLiteral("structured_memory")] = structuredMemoryToJson();
+    inputJson[QStringLiteral("conversation_summary")] = QString();
     inputJson[QStringLiteral("history")] = buildHistoryPayload();
+    inputJson[QStringLiteral("max_context_chars")] = config->getChatMaxContextChars();
+    inputJson[QStringLiteral("max_history_estimated_tokens")] = config->getChatMaxHistoryEstTokens();
+    inputJson[QStringLiteral("context_chars_per_est_token")] = config->getChatCharsPerEstToken();
+    inputJson[QStringLiteral("reply_no_stage_directions")] = config->isChatReplyNoStageDirections();
 
     const QByteArray payload = QJsonDocument(inputJson).toJson(QJsonDocument::Compact);
 
@@ -545,10 +684,55 @@ QString PetStateChat::absoluteChatMemoryPath() const
     return absoluteChatMemoryPathFromConfig();
 }
 
+QJsonObject PetStateChat::structuredMemoryToJson() const
+{
+    QJsonObject m;
+    m.insert(QStringLiteral("preferences"), m_memoryPreferences);
+    m.insert(QStringLiteral("tasks"), m_memoryTasks);
+    m.insert(QStringLiteral("avoid"), m_memoryAvoid);
+    m.insert(QStringLiteral("facts"), m_memoryFacts);
+    return m;
+}
+
+void PetStateChat::applyStructuredMemoryFromJson(const QJsonObject& o)
+{
+    PetConfig* cfg = PetConfig::getInstance();
+    const QJsonObject lim = cfg->getStructuredMemoryLimitsJson();
+    auto clip = [](const QString& s, int maxLen) {
+        if (maxLen <= 0 || s.size() <= maxLen) {
+            return s;
+        }
+        return s.left(maxLen);
+    };
+    m_memoryPreferences = clip(o.value(QStringLiteral("preferences")).toString(),
+                               lim.value(QStringLiteral("preferences")).toInt(120));
+    m_memoryTasks = clip(o.value(QStringLiteral("tasks")).toString(),
+                         lim.value(QStringLiteral("tasks")).toInt(120));
+    m_memoryAvoid = clip(o.value(QStringLiteral("avoid")).toString(),
+                         lim.value(QStringLiteral("avoid")).toInt(80));
+    m_memoryFacts = clip(o.value(QStringLiteral("facts")).toString(),
+                         lim.value(QStringLiteral("facts")).toInt(120));
+}
+
+void PetStateChat::clearStructuredMemory()
+{
+    m_memoryPreferences.clear();
+    m_memoryTasks.clear();
+    m_memoryAvoid.clear();
+    m_memoryFacts.clear();
+}
+
 void PetStateChat::writeEmptyChatMemoryFile()
 {
+    QJsonObject mem;
+    mem.insert(QStringLiteral("preferences"), QString());
+    mem.insert(QStringLiteral("tasks"), QString());
+    mem.insert(QStringLiteral("avoid"), QString());
+    mem.insert(QStringLiteral("facts"), QString());
+
     QJsonObject root;
-    root[QStringLiteral("version")] = 1;
+    root[QStringLiteral("version")] = 2;
+    root[QStringLiteral("memory")] = mem;
     root[QStringLiteral("summary")] = QString();
     root[QStringLiteral("messages")] = QJsonArray();
 
@@ -568,14 +752,14 @@ void PetStateChat::writeEmptyChatMemoryFile()
 void PetStateChat::wipeChatTurnsSummaryAndSave()
 {
     m_chatMessages.clear();
-    m_conversationSummary.clear();
+    clearStructuredMemory();
     saveChatMemory();
 }
 
 void PetStateChat::loadChatMemory()
 {
     m_chatMessages.clear();
-    m_conversationSummary.clear();
+    clearStructuredMemory();
 
     const QString path = absoluteChatMemoryPath();
     QFile f(path);
@@ -592,7 +776,19 @@ void PetStateChat::loadChatMemory()
     }
 
     const QJsonObject root = doc.object();
-    m_conversationSummary = root.value(QStringLiteral("summary")).toString();
+    const QJsonObject mem = root.value(QStringLiteral("memory")).toObject();
+    if (!mem.isEmpty()) {
+        applyStructuredMemoryFromJson(mem);
+    } else {
+        const QString legacy = root.value(QStringLiteral("summary")).toString().trimmed();
+        if (!legacy.isEmpty()) {
+            PetConfig* cfg = PetConfig::getInstance();
+            const int maxFacts = cfg->getStructuredMemoryLimitsJson()
+                                     .value(QStringLiteral("facts"))
+                                     .toInt(120);
+            m_memoryFacts = legacy.size() > maxFacts ? legacy.left(maxFacts) : legacy;
+        }
+    }
 
     const QJsonArray arr = root.value(QStringLiteral("messages")).toArray();
     const int maxLoad = 400;
@@ -618,11 +814,17 @@ void PetStateChat::loadChatMemory()
     }
 }
 
+void PetStateChat::reloadChatMemoryFromDisk()
+{
+    loadChatMemory();
+}
+
 void PetStateChat::saveChatMemory()
 {
     QJsonObject root;
-    root[QStringLiteral("version")] = 1;
-    root[QStringLiteral("summary")] = m_conversationSummary;
+    root[QStringLiteral("version")] = 2;
+    root[QStringLiteral("memory")] = structuredMemoryToJson();
+    root[QStringLiteral("summary")] = QString();
 
     QJsonArray msgs;
     const int maxSave = 500;
@@ -673,11 +875,29 @@ QJsonArray PetStateChat::buildHistoryPayload() const
     }
 
     qint64 total = 0;
-    const qint64 budget = cfg->getChatMaxContextChars();
+    const qint64 reserve = static_cast<qint64>(cfg->getChatContextReserveChars());
+    const qint64 rawBudget = static_cast<qint64>(cfg->getChatMaxContextChars());
+    const qint64 budget = qMax(static_cast<qint64>(400), rawBudget - reserve);
+
     for (int i = n - 1; i >= start; --i) {
         total += static_cast<qint64>(m_chatMessages[i].content.size());
     }
     while (start < n - 1 && total > budget) {
+        total -= static_cast<qint64>(m_chatMessages[start].content.size());
+        ++start;
+    }
+
+    const qint64 maxHistTok = static_cast<qint64>(cfg->getChatMaxHistoryEstTokens());
+    const int cpt = qMax(1, cfg->getChatCharsPerEstToken());
+    while (start < n - 1 && maxHistTok > 0) {
+        qint64 histChars = 0;
+        for (int i = start; i < n; ++i) {
+            histChars += static_cast<qint64>(m_chatMessages[i].content.size());
+        }
+        const qint64 estTok = (histChars + static_cast<qint64>(cpt) - 1) / static_cast<qint64>(cpt);
+        if (estTok <= maxHistTok) {
+            break;
+        }
         total -= static_cast<qint64>(m_chatMessages[start].content.size());
         ++start;
     }
@@ -692,28 +912,52 @@ QJsonArray PetStateChat::buildHistoryPayload() const
     return arr;
 }
 
-bool PetStateChat::tryCompressOldTurns()
+void PetStateChat::tryCompressOldTurns()
 {
     PetConfig* cfg = PetConfig::getInstance();
     if (!cfg->isChatSummaryEnabled()) {
-        return false;
+        return;
+    }
+    if (m_summarizeInProgress) {
+        return;
     }
 
     const int n = m_chatMessages.size();
     if (n < 2) {
-        return false;
+        return;
     }
 
     const int pairs = n / 2;
     const int keep = cfg->getChatSummaryKeepRecentTurns();
     const int trigger = cfg->getChatSummaryCompressAfterTurns();
-    if (pairs <= trigger) {
-        return false;
+    const qint64 memChars = static_cast<qint64>(m_memoryPreferences.size() + m_memoryTasks.size()
+                                                + m_memoryAvoid.size() + m_memoryFacts.size());
+    const int memThresh = cfg->getChatSummaryCompressAfterMemoryChars();
+    const bool overMem = (memThresh > 0 && memChars >= static_cast<qint64>(memThresh));
+    const bool overTurns = (pairs > trigger);
+    if (!overTurns && !overMem) {
+        return;
     }
 
     const int removePairs = pairs - keep;
     if (removePairs <= 0) {
-        return false;
+        if (overMem && memThresh > 0) {
+            qWarning() << "[结构化摘要] 记忆体积超阈值但无可合并的旧轮次，对各槽位截断至约 2/3 上限";
+            const QJsonObject lim = cfg->getStructuredMemoryLimitsJson();
+            auto shrink = [&](QString& s, const QString& key) {
+                const int mx = lim.value(key).toInt(80);
+                const int t = qMax(16, mx * 2 / 3);
+                if (s.size() > t) {
+                    s = s.left(t);
+                }
+            };
+            shrink(m_memoryPreferences, QStringLiteral("preferences"));
+            shrink(m_memoryTasks, QStringLiteral("tasks"));
+            shrink(m_memoryAvoid, QStringLiteral("avoid"));
+            shrink(m_memoryFacts, QStringLiteral("facts"));
+            saveChatMemory();
+        }
+        return;
     }
 
     const int removeMsgs = removePairs * 2;
@@ -726,104 +970,67 @@ bool PetStateChat::tryCompressOldTurns()
         chunk += QLatin1Char('\n');
     }
 
-    const QString merged = runSummarizeMerge(chunk.left(12000));
-    if (merged.isEmpty()) {
-        qWarning() << "[聊天记忆] 摘要失败，保留原文";
-        return false;
-    }
-
-    m_conversationSummary = merged;
-    m_chatMessages.remove(0, removeMsgs);
-    return true;
-}
-
-QString PetStateChat::runSummarizeMerge(const QString& dialogueChunk)
-{
-    PetConfig* config = PetConfig::getInstance();
     const QString projectRootPath = resolveProjectRootPath();
-
-    QString scriptPath = config->getChatScriptPath();
+    QString scriptPath = cfg->getChatScriptPath();
     if (QDir::isRelativePath(scriptPath)) {
         scriptPath = QDir(projectRootPath).absoluteFilePath(scriptPath);
     }
     if (!QFile::exists(scriptPath)) {
-        return QString();
+        qWarning() << "[结构化摘要] 脚本不存在";
+        return;
     }
 
-    QJsonObject root;
-    root[QStringLiteral("mode")] = QStringLiteral("summarize");
-    root[QStringLiteral("existing_summary")] = m_conversationSummary;
-    root[QStringLiteral("dialogue_chunk")] = dialogueChunk;
-    root[QStringLiteral("summary_max_chars")] = config->getChatSummaryMaxChars();
-    root[QStringLiteral("model")] = config->getChatModel();
-    root[QStringLiteral("ollama_host")] = config->getChatOllamaHost();
-
-    const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
-
-    QString pythonExecutable = config->getPythonPath().trimmed();
+    QString pythonExecutable = cfg->getPythonPath().trimmed();
     if (pythonExecutable.isEmpty()) {
         pythonExecutable = QStringLiteral("python3");
     }
-    const QStringList args = {scriptPath, QStringLiteral("--stdin-json")};
 
-    QProcess proc;
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
-    env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
-    env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
-    proc.setProcessEnvironment(env);
+    const QString chunkTrim = chunk.left(12000);
+    const QJsonObject existing = structuredMemoryToJson();
+    const QJsonObject limits = cfg->getStructuredMemoryLimitsJson();
+    const QString model = cfg->getChatModel();
+    const QString ollamaHost = cfg->getChatOllamaHost();
+    const QString provider = cfg->getChatProvider();
+    const QString apiBase = cfg->getChatApiBase();
+    const QString apiKey = cfg->getChatApiKey();
+    const QString apiKeyEnv = cfg->getChatApiKeyEnv();
 
-    proc.start(pythonExecutable, args);
+    m_summarizeInProgress = true;
+    QFuture<QJsonObject> future = QtConcurrent::run(
+        [chunkTrim, existing, limits, model, ollamaHost, provider, apiBase, apiKey, apiKeyEnv, scriptPath, pythonExecutable]() {
+            return runStructuredSummarizeWorker(chunkTrim, existing, limits, model, ollamaHost,
+                                                provider, apiBase, apiKey, apiKeyEnv, scriptPath, pythonExecutable);
+        });
 
-    QElapsedTimer startWait;
-    startWait.start();
-    while (!proc.waitForStarted(100)) {
-        if (proc.state() == QProcess::NotRunning) {
-            qWarning() << "[聊天摘要] Python 启动失败";
-            return QString();
+    auto* watcher = new QFutureWatcher<QJsonObject>(this);
+    connect(watcher, &QFutureWatcher<QJsonObject>::finished, this, [this, watcher, removeMsgs]() {
+        const QJsonObject mem = watcher->result();
+        watcher->deleteLater();
+        m_summarizeInProgress = false;
+        if (!mem.isEmpty()) {
+            bool ok = true;
+            static const QStringList slotKeys = {
+                QStringLiteral("preferences"),
+                QStringLiteral("tasks"),
+                QStringLiteral("avoid"),
+                QStringLiteral("facts"),
+            };
+            for (const QString& sk : slotKeys) {
+                if (!mem.contains(sk) || !mem.value(sk).isString()) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                applyStructuredMemoryFromJson(mem);
+                m_chatMessages.remove(0, removeMsgs);
+            } else {
+                qWarning() << "[结构化摘要] 合并结果校验失败，保留原文与记忆";
+            }
+        } else {
+            qWarning() << "[结构化摘要] 合并失败，保留原文";
         }
-        if (startWait.elapsed() > 8000) {
-            proc.kill();
-            qWarning() << "[聊天摘要] Python 启动超时";
-            return QString();
-        }
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-    }
-
-    proc.write(payload);
-    proc.closeWriteChannel();
-
-    QElapsedTimer runWait;
-    runWait.start();
-    while (!proc.waitForFinished(100)) {
-        if (runWait.elapsed() > 120000) {
-            proc.kill();
-            qWarning() << "[聊天摘要] 超时";
-            return QString();
-        }
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-    }
-
-    const QByteArray out = proc.readAllStandardOutput();
-    const QList<QByteArray> lines = out.split('\n');
-    for (const QByteArray& raw : lines) {
-        const QByteArray line = raw.trimmed();
-        if (line.isEmpty()) {
-            continue;
-        }
-        QJsonParseError err;
-        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
-        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            continue;
-        }
-        const QJsonObject obj = doc.object();
-        if (obj.value(QStringLiteral("event")).toString() != QStringLiteral("done")) {
-            continue;
-        }
-        if (!obj.value(QStringLiteral("success")).toBool()) {
-            return QString();
-        }
-        return obj.value(QStringLiteral("summary")).toString().trimmed();
-    }
-    return QString();
+        saveChatMemory();
+    });
+    watcher->setFuture(future);
 }

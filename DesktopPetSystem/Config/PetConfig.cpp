@@ -1,6 +1,7 @@
 #pragma execution_character_set("utf-8")
 
 #include "PetConfig.h"
+#include <QFileInfo>
 
 PetConfig* PetConfig::m_instance = nullptr;
 
@@ -54,6 +55,8 @@ bool PetConfig::loadConfig(const QString& path) {
 
     QJsonObject rootObj = doc.object();
 
+    m_configFilePath = QFileInfo(path).absoluteFilePath();
+
     // 读取属性配置
     QJsonObject attrObj = getNestedObj(rootObj, "attributes");
     m_defaultHunger = attrObj.value("default_hunger").toInt(50);
@@ -88,8 +91,6 @@ bool PetConfig::loadConfig(const QString& path) {
     } else {
         m_sleepHungerDecay = sleepObj.value("hunger_decay").toInt(1) * 60;
     }
-    m_sleepTransitionDelay = sleepObj.value("transition_delay").toInt(2);
-
     // 读取玩耍配置
     QJsonObject playObj = getNestedObj(rootObj, "play");
     if (playObj.contains(QStringLiteral("mood_increase_per_minute"))) {
@@ -177,30 +178,7 @@ bool PetConfig::loadConfig(const QString& path) {
     m_expGrowth = progressionObj.value("exp_growth").toInt(20);
 
     // 读取聊天运行时配置
-    QJsonObject chatRuntimeObj = getNestedObj(rootObj, "chat_runtime");
-    m_chatModel = chatRuntimeObj.value("model").toString("llama3.1:8b");
-    m_chatScriptPath = chatRuntimeObj.value("script_path").toString("resources/scripts/chat_ai.py");
-    m_pythonPath = chatRuntimeObj.value("python_path").toString("python3");
-    m_chatOllamaHost = chatRuntimeObj.value("ollama_host").toString("http://127.0.0.1:11434");
-    m_chatContextTurns = chatRuntimeObj.value("context_turns").toInt(8);
-    m_chatMaxContextChars = chatRuntimeObj.value("max_context_chars").toInt(8000);
-    m_chatMemoryPath = chatRuntimeObj.value("memory_path").toString("resources/save/chat_memory.json");
-    m_chatSummaryEnabled = chatRuntimeObj.value("summary_enabled").toBool(true);
-    m_chatSummaryCompressAfterTurns = chatRuntimeObj.value("summary_compress_after_turns").toInt(12);
-    m_chatSummaryKeepRecentTurns = chatRuntimeObj.value("summary_keep_recent_turns").toInt(8);
-    m_chatSummaryMaxChars = chatRuntimeObj.value("summary_max_chars").toInt(400);
-    if (m_chatContextTurns < 1) {
-        m_chatContextTurns = 1;
-    }
-    if (m_chatMaxContextChars < 500) {
-        m_chatMaxContextChars = 500;
-    }
-    if (m_chatSummaryKeepRecentTurns < 1) {
-        m_chatSummaryKeepRecentTurns = 1;
-    }
-    if (m_chatSummaryCompressAfterTurns < m_chatSummaryKeepRecentTurns + 1) {
-        m_chatSummaryCompressAfterTurns = m_chatSummaryKeepRecentTurns + 2;
-    }
+    applyChatRuntimeObject(getNestedObj(rootObj, "chat_runtime"));
 
     // 读取日志配置
     QJsonObject loggingObj = getNestedObj(rootObj, "logging");
@@ -213,14 +191,18 @@ bool PetConfig::loadConfig(const QString& path) {
     m_moveUpdateInterval = moveObj.value("update_interval").toInt(33);
     m_directionKeepRate = moveObj.value("direction_keep_rate").toInt(80);
 
-    // 读取动画配置
-    QJsonObject animObj = getNestedObj(rootObj, "animation");
-    m_specialAnimationDuration = animObj.value("special_duration").toInt(2000);
+    QJsonObject interactionObj = getNestedObj(rootObj, "interaction");
+    m_doubleClickCooldownMs = interactionObj.value("double_click_cooldown_ms").toInt(10000);
+    if (m_doubleClickCooldownMs < 0) {
+        m_doubleClickCooldownMs = 0;
+    }
+    m_doubleClickMoodDeltaIdle = interactionObj.value(QStringLiteral("double_click_mood_delta_idle")).toInt(2);
+    m_doubleClickMoodDeltaAbnormal = interactionObj.value(QStringLiteral("double_click_mood_delta_abnormal")).toInt(1);
 
     // 读取窗口配置
     QJsonObject windowObj = getNestedObj(rootObj, "window");
-    m_windowWidth = windowObj.value("width").toInt(200);
-    m_windowHeight = windowObj.value("height").toInt(200);
+    m_windowWidth = windowObj.value("width").toInt(300);
+    m_windowHeight = windowObj.value("height").toInt(300);
 
     // 读取属性边界
     QJsonObject limitsObj = getNestedObj(rootObj, "limits");
@@ -228,6 +210,7 @@ bool PetConfig::loadConfig(const QString& path) {
     m_minValue = limitsObj.value("min_value").toInt(0);
 
     // 读取食物配置
+    m_foods.clear();
     QJsonObject foodsObj = getNestedObj(rootObj, "foods");
     for (auto it = foodsObj.begin(); it != foodsObj.end(); ++it) {
         QJsonObject foodObj = it.value().toObject();
@@ -242,6 +225,17 @@ bool PetConfig::loadConfig(const QString& path) {
         m_foods[it.key()] = food;
     }
 
+    m_animationScales.clear();
+    if (rootObj.contains(QStringLiteral("animation_scales"))
+        && rootObj.value(QStringLiteral("animation_scales")).isObject()) {
+        const QJsonObject animScObj = rootObj.value(QStringLiteral("animation_scales")).toObject();
+        for (auto it = animScObj.begin(); it != animScObj.end(); ++it) {
+            double v = it.value().toDouble(1.0);
+            v = qBound(0.05, v, 4.0);
+            m_animationScales.insert(normalizeAnimationRelativePath(it.key()), v);
+        }
+    }
+
     qDebug() << "[配置加载成功] =========";
     qDebug() << "默认属性: 饱食=" << m_defaultHunger << "精力=" << m_defaultEnergy << "心情=" << m_defaultMood;
     qDebug() << "阈值: 异常=" << m_abnormalThreshold << "自动睡眠=" << m_autoSleepEnergy << "恢复=" << m_recoveryThreshold;
@@ -250,5 +244,149 @@ bool PetConfig::loadConfig(const QString& path) {
     qDebug() << "成长: base=" << m_expBase << "growth=" << m_expGrowth;
     qDebug() << "========================";
 
+    emit configReloaded();
     return true;
+}
+
+void PetConfig::applyChatRuntimeObject(const QJsonObject& chatRuntimeObj)
+{
+    m_chatProvider = chatRuntimeObj.value("provider").toString("ollama").trimmed().toLower();
+    m_chatApiBase = chatRuntimeObj.value("api_base").toString("").trimmed();
+    m_chatApiKey = chatRuntimeObj.value("api_key").toString("").trimmed();
+    m_chatApiKeyEnv = chatRuntimeObj.value("api_key_env").toString("").trimmed();
+    m_chatModel = chatRuntimeObj.value("model").toString("llama3.1:8b");
+    m_chatScriptPath = chatRuntimeObj.value("script_path").toString("resources/scripts/chat_ai.py");
+    m_pythonPath = chatRuntimeObj.value("python_path").toString("python3");
+    m_chatOllamaHost = chatRuntimeObj.value("ollama_host").toString("http://127.0.0.1:11434");
+    m_chatPetPersona = chatRuntimeObj.value("pet_persona").toString();
+    m_chatContextTurns = chatRuntimeObj.value("context_turns").toInt(8);
+    m_chatMaxContextChars = chatRuntimeObj.value("max_context_chars").toInt(8000);
+    m_chatMaxReplyTokens = chatRuntimeObj.value("max_reply_tokens").toInt(1024);
+    if (m_chatMaxReplyTokens < 64) {
+        m_chatMaxReplyTokens = 64;
+    }
+    if (m_chatMaxReplyTokens > 8192) {
+        m_chatMaxReplyTokens = 8192;
+    }
+    m_chatMaxInputChars = chatRuntimeObj.value("max_input_chars").toInt(800);
+    if (m_chatMaxInputChars < 50) {
+        m_chatMaxInputChars = 50;
+    }
+    if (m_chatMaxInputChars > 32000) {
+        m_chatMaxInputChars = 32000;
+    }
+    m_chatContextReserveChars = chatRuntimeObj.value("context_reserve_chars").toInt(2000);
+    if (m_chatContextReserveChars < 200) {
+        m_chatContextReserveChars = 200;
+    }
+    if (m_chatContextReserveChars > 50000) {
+        m_chatContextReserveChars = 50000;
+    }
+    m_chatMaxHistoryEstTokens = chatRuntimeObj.value("max_history_estimated_tokens").toInt(0);
+    if (m_chatMaxHistoryEstTokens < 0) {
+        m_chatMaxHistoryEstTokens = 0;
+    }
+    if (m_chatMaxHistoryEstTokens > 500000) {
+        m_chatMaxHistoryEstTokens = 500000;
+    }
+    m_chatCharsPerEstToken = chatRuntimeObj.value("context_chars_per_est_token").toInt(3);
+    if (m_chatCharsPerEstToken < 1) {
+        m_chatCharsPerEstToken = 1;
+    }
+    if (m_chatCharsPerEstToken > 16) {
+        m_chatCharsPerEstToken = 16;
+    }
+    m_chatSummaryCompressAfterMemoryChars = chatRuntimeObj.value("summary_compress_after_memory_chars").toInt(2800);
+    if (m_chatSummaryCompressAfterMemoryChars < 0) {
+        m_chatSummaryCompressAfterMemoryChars = 0;
+    }
+    if (m_chatSummaryCompressAfterMemoryChars > 500000) {
+        m_chatSummaryCompressAfterMemoryChars = 500000;
+    }
+    m_chatReplyNoStageDirections = chatRuntimeObj.value("reply_no_stage_directions").toBool(true);
+    m_chatMemoryPath = chatRuntimeObj.value("memory_path").toString("resources/save/chat_memory.json");
+    m_chatSummaryEnabled = chatRuntimeObj.value("summary_enabled").toBool(true);
+    m_chatSummaryCompressAfterTurns = chatRuntimeObj.value("summary_compress_after_turns").toInt(12);
+    m_chatSummaryKeepRecentTurns = chatRuntimeObj.value("summary_keep_recent_turns").toInt(8);
+    m_chatSummaryMaxChars = chatRuntimeObj.value("summary_max_chars").toInt(400);
+    const int quarter = qMax(32, m_chatSummaryMaxChars / 4);
+    m_memoryPreferencesMaxChars = chatRuntimeObj.value("memory_preferences_max_chars").toInt(quarter);
+    m_memoryTasksMaxChars = chatRuntimeObj.value("memory_tasks_max_chars").toInt(quarter);
+    m_memoryAvoidMaxChars = chatRuntimeObj.value("memory_avoid_max_chars").toInt(qMax(24, quarter - 20));
+    m_memoryFactsMaxChars = chatRuntimeObj.value("memory_facts_max_chars").toInt(quarter);
+    auto clampMem = [](int v) { return qMax(16, v); };
+    m_memoryPreferencesMaxChars = clampMem(m_memoryPreferencesMaxChars);
+    m_memoryTasksMaxChars = clampMem(m_memoryTasksMaxChars);
+    m_memoryAvoidMaxChars = clampMem(m_memoryAvoidMaxChars);
+    m_memoryFactsMaxChars = clampMem(m_memoryFactsMaxChars);
+    if (m_chatContextTurns < 1) {
+        m_chatContextTurns = 1;
+    }
+    if (m_chatMaxContextChars < 500) {
+        m_chatMaxContextChars = 500;
+    }
+    if (m_chatSummaryKeepRecentTurns < 1) {
+        m_chatSummaryKeepRecentTurns = 1;
+    }
+    if (m_chatSummaryCompressAfterTurns < m_chatSummaryKeepRecentTurns + 1) {
+        m_chatSummaryCompressAfterTurns = m_chatSummaryKeepRecentTurns + 2;
+    }
+}
+
+bool PetConfig::reloadChatRuntimeFromFile()
+{
+    if (m_configFilePath.isEmpty()) {
+        return false;
+    }
+
+    QFile file(m_configFilePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "[配置] chat_runtime 同步读取失败:" << file.errorString();
+        return false;
+    }
+
+    const QByteArray jsonData = file.readAll();
+    file.close();
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(jsonData, &parseError);
+    if (doc.isNull() || !doc.isObject()) {
+        qWarning() << "[配置] chat_runtime 同步 JSON 无效:" << parseError.errorString();
+        return false;
+    }
+
+    const QJsonObject chatRuntimeObj = getNestedObj(doc.object(), QStringLiteral("chat_runtime"));
+    if (chatRuntimeObj.isEmpty()) {
+        return false;
+    }
+
+    applyChatRuntimeObject(chatRuntimeObj);
+    emit chatRuntimeSynced();
+    return true;
+}
+
+QJsonObject PetConfig::getStructuredMemoryLimitsJson() const
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("preferences"), m_memoryPreferencesMaxChars);
+    o.insert(QStringLiteral("tasks"), m_memoryTasksMaxChars);
+    o.insert(QStringLiteral("avoid"), m_memoryAvoidMaxChars);
+    o.insert(QStringLiteral("facts"), m_memoryFactsMaxChars);
+    return o;
+}
+
+QString PetConfig::normalizeAnimationRelativePath(QString path)
+{
+    path.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    while (path.startsWith(QLatin1Char('/')))
+        path = path.mid(1);
+    return path;
+}
+
+double PetConfig::animationScaleForRelativePath(const QString& relativePath) const
+{
+    const QString k = normalizeAnimationRelativePath(relativePath);
+    if (k.isEmpty())
+        return 1.0;
+    return m_animationScales.value(k, 1.0);
 }

@@ -7,6 +7,7 @@
 #include <QString>
 #include <QVector>
 #include <QJsonArray>
+#include <QJsonObject>
 
 struct ChatMessage {
     QString role;
@@ -27,6 +28,8 @@ public:
     static void writeEmptyChatMemoryFile();
     /** 清空内存中的对话与摘要并写入磁盘；重置时若仍在对话状态须先调用，避免 exit() 写回旧记录 */
     void wipeChatTurnsSummaryAndSave();
+    /** 从磁盘重新载入 chat_memory.json（手动编辑记忆文件后调用） */
+    void reloadChatMemoryFromDisk();
 
     void enter() override;
     void update() override;
@@ -63,8 +66,11 @@ private:
     void saveChatMemory();
     void appendSuccessfulExchange(const QString& userText, const QString& assistantText);
     QJsonArray buildHistoryPayload() const;
-    bool tryCompressOldTurns();
-    QString runSummarizeMerge(const QString& dialogueChunk);
+    void tryCompressOldTurns();
+
+    QJsonObject structuredMemoryToJson() const;
+    void applyStructuredMemoryFromJson(const QJsonObject& o);
+    void clearStructuredMemory();
 
     bool m_isChatting = false;
     QProcess* m_process = nullptr;
@@ -77,7 +83,11 @@ private:
     bool m_finalizeDone = false;
 
     QVector<ChatMessage> m_chatMessages;
-    QString m_conversationSummary;
+    QString m_memoryPreferences;
+    QString m_memoryTasks;
+    QString m_memoryAvoid;
+    QString m_memoryFacts;
+    bool m_summarizeInProgress = false;
     QString m_assistantStreamingBuffer;
     QString m_pendingDoneReply;
     QByteArray m_chatStdinPending;

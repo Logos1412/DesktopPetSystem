@@ -53,9 +53,12 @@ public:
     // 双击交互（默认空实现）
     virtual void onDoubleClick() {}
 
+    /** 「饱食+2」「精力-1」用于结算日志；供 PetWidget 等复用 */
+    static QString formatSettlementAttrDelta(const QString& label, int delta);
+
 signals:
-    // 请求播放动画信号
-    void requestPlayAnimation(const QString& animationPath, bool isStateAnimation = false);
+    // 请求播放动画信号（playOnce：仅播放一轮后结束，配合 QMovie::finished）
+    void requestPlayAnimation(const QString& animationPath, bool isStateAnimation = false, bool playOnce = false);
 
 protected:
     /** 配置的 rat 为每分钟变化整数；每秒 tick 累加 remainder，整数部分应用到属性（进入状态时请将 remainder 置 0） */
@@ -63,11 +66,13 @@ protected:
 
     /** 进入状态时清零并记录「本窗口」起始三维，用于 60s 结算差值 */
     void resetPeriodicSettlementLog();
-    /** 每秒 tick 调用一次：满 60 秒输出一条 [结算]；中段为预计变化（配置「每分钟」意图），结算前后为实际快照 */
-    void maybeLogMinuteSettlement(const QString& stateLabel, int expectedDh, int expectedDe, int expectedDm);
-
-    /** 「饱食+2」「精力-1」用于结算日志 */
-    static QString formatSettlementAttrDelta(const QString& label, int delta);
+    /** 每秒 tick 调用一次：满 60 秒输出一条 [结算]；expected* 为配置的每分钟意图；含经验/金币时一并打印 */
+    void maybeLogMinuteSettlement(const QString& stateLabel,
+                                  int expectedDh,
+                                  int expectedDe,
+                                  int expectedDm,
+                                  int expectedDexp = 0,
+                                  int expectedDcoin = 0);
 
     PetFSM* m_fsm;              // 状态机指针
     PetAttribute* m_attr;       // 属性指针
@@ -78,4 +83,7 @@ private:
     int m_settlementBaseHunger = 0;
     int m_settlementBaseEnergy = 0;
     int m_settlementBaseMood = 0;
+    int m_settlementBaseExp = 0;
+    int m_settlementBaseLevel = 0;
+    int m_settlementBaseCoin = 0;
 };

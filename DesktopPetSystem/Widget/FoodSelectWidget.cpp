@@ -4,8 +4,30 @@
 #include "PetAttribute.h"
 #include "PetConfig.h"
 
-#include <QScrollArea>
+#include <algorithm>
+
+#include <QStringList>
+#include <QVector>
 #include <QFrame>
+#include <QSizePolicy>
+
+namespace {
+
+QVector<FoodData> foodsSortedByPriceAscending(const QMap<QString, FoodData>& foods)
+{
+    QVector<FoodData> v;
+    v.reserve(foods.size());
+    for (auto it = foods.begin(); it != foods.end(); ++it)
+        v.append(it.value());
+    std::sort(v.begin(), v.end(), [](const FoodData& a, const FoodData& b) {
+        if (a.price != b.price)
+            return a.price < b.price;
+        return a.name < b.name;
+    });
+    return v;
+}
+
+} // namespace
 
 FoodSelectWidget::FoodSelectWidget(PetAttribute* attr, QWidget* parent)
     : QWidget(nullptr), m_attr(attr)
@@ -17,7 +39,8 @@ FoodSelectWidget::FoodSelectWidget(PetAttribute* attr, QWidget* parent)
 void FoodSelectWidget::initStyle()
 {
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool | Qt::Popup);
-    setFixedSize(220, 280);
+    setMinimumWidth(300);
+    setMaximumWidth(420);
     setMouseTracking(true);
 
     setStyleSheet(
@@ -69,17 +92,15 @@ void FoodSelectWidget::initUI()
     m_foodLayout->setSpacing(6);
 
     PetConfig* config = PetConfig::getInstance();
-    QMap<QString, FoodData> foods = config->getFoods();
+    const QVector<FoodData> foods = foodsSortedByPriceAscending(config->getFoods());
 
-    for (auto it = foods.begin(); it != foods.end(); ++it) {
-        QWidget* item = createFoodItem(it.value());
+    for (const FoodData& fd : foods) {
+        QWidget* item = createFoodItem(fd);
         m_foodLayout->addWidget(item);
     }
 
     foodContainer->setLayout(m_foodLayout);
     mainLayout->addWidget(foodContainer);
-
-    mainLayout->addStretch();
 
     QFrame* line2 = new QFrame(this);
     line2->setFrameShape(QFrame::HLine);
@@ -92,38 +113,83 @@ void FoodSelectWidget::initUI()
     mainLayout->addWidget(m_coinLabel);
 
     updateCoinDisplay();
+    adjustSize();
+}
+
+void FoodSelectWidget::rebuildFoodListFromConfig()
+{
+    if (!m_foodLayout)
+        return;
+
+    QLayoutItem* item = nullptr;
+    while ((item = m_foodLayout->takeAt(0)) != nullptr) {
+        if (item->widget()) {
+            delete item->widget();
+        }
+        delete item;
+    }
+    m_foodButtons.clear();
+
+    PetConfig* config = PetConfig::getInstance();
+    const QVector<FoodData> foods = foodsSortedByPriceAscending(config->getFoods());
+    for (const FoodData& fd : foods) {
+        m_foodLayout->addWidget(createFoodItem(fd));
+    }
+    updateCoinDisplay();
+    adjustSize();
 }
 
 QWidget* FoodSelectWidget::createFoodItem(const FoodData& food)
 {
     QWidget* item = new QWidget(this);
     QHBoxLayout* layout = new QHBoxLayout(item);
-    layout->setContentsMargins(4, 2, 4, 2);
-    layout->setSpacing(4);
+    layout->setContentsMargins(2, 4, 2, 4);
+    layout->setSpacing(8);
 
-    QLabel* nameLabel = new QLabel(food.name, item);
-    nameLabel->setFixedWidth(50);
-    nameLabel->setStyleSheet("font-weight: bold;");
-    layout->addWidget(nameLabel);
+    auto* textBlock = new QWidget(item);
+    auto* textLay = new QVBoxLayout(textBlock);
+    textLay->setContentsMargins(0, 0, 0, 0);
+    textLay->setSpacing(2);
 
-    QString effectText;
-    if (food.hunger > 0) effectText += u8"饱食+" + QString::number(food.hunger) + " ";
-    if (food.energy > 0) effectText += u8"精力+" + QString::number(food.energy) + " ";
-    if (food.mood > 0) effectText += u8"心情+" + QString::number(food.mood);
-    
-    QLabel* effectLabel = new QLabel(effectText.trimmed(), item);
-    effectLabel->setStyleSheet("font-size: 10px; color: #666;");
-    layout->addWidget(effectLabel);
+    QLabel* nameLabel = new QLabel(food.name, textBlock);
+    nameLabel->setWordWrap(true);
+    nameLabel->setStyleSheet(QStringLiteral("font-weight: bold; font-size: 12px;"));
+    nameLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
 
-    layout->addStretch();
+    QStringList effectParts;
+    if (food.hunger > 0)
+        effectParts << (u8"饱食+" + QString::number(food.hunger));
+    if (food.energy > 0)
+        effectParts << (u8"精力+" + QString::number(food.energy));
+    if (food.mood > 0)
+        effectParts << (u8"心情+" + QString::number(food.mood));
+    if (food.exp > 0)
+        effectParts << (u8"经验+" + QString::number(food.exp));
 
-    QLabel* priceLabel = new QLabel(u8"¥" + QString::number(food.price), item);
+    QLabel* effectLabel = new QLabel(effectParts.isEmpty() ? QString() : effectParts.join(QStringLiteral(" ")), textBlock);
+    effectLabel->setWordWrap(true);
+    effectLabel->setStyleSheet(QStringLiteral("font-size: 10px; color: #666;"));
+    effectLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+
+    textLay->addWidget(nameLabel);
+    textLay->addWidget(effectLabel);
+
+    textBlock->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    layout->addWidget(textBlock, 1);
+
+    auto* rightCol = new QWidget(item);
+    auto* rightLay = new QVBoxLayout(rightCol);
+    rightLay->setContentsMargins(0, 0, 0, 0);
+    rightLay->setSpacing(4);
+    rightLay->setAlignment(Qt::AlignTop);
+
+    QLabel* priceLabel = new QLabel(u8"¥" + QString::number(food.price), rightCol);
     priceLabel->setStyleSheet("font-size: 11px; color: #E91E63; font-weight: bold;");
-    priceLabel->setFixedWidth(35);
-    layout->addWidget(priceLabel);
+    priceLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    priceLabel->setMinimumWidth(42);
 
-    QPushButton* buyBtn = new QPushButton(u8"选择", item);
-    buyBtn->setFixedSize(40, 22);
+    QPushButton* buyBtn = new QPushButton(u8"选择", rightCol);
+    buyBtn->setFixedSize(48, 26);
     buyBtn->setProperty("foodId", food.id);
     buyBtn->setProperty("foodPrice", food.price);
 
@@ -137,7 +203,11 @@ QWidget* FoodSelectWidget::createFoodItem(const FoodData& food)
     });
 
     m_foodButtons[food.id] = buyBtn;
-    layout->addWidget(buyBtn);
+    rightLay->addWidget(priceLabel);
+    rightLay->addWidget(buyBtn);
+    rightCol->setFixedWidth(62);
+
+    layout->addWidget(rightCol, 0, Qt::AlignTop);
 
     return item;
 }

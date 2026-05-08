@@ -43,7 +43,9 @@ void PetStateStudy::update()
     maybeLogMinuteSettlement(QStringLiteral("学习"),
                              -m_config->getStudyHungerDecayPerMinute(),
                              -m_config->getStudyEnergyDecayPerMinute(),
-                             -m_config->getStudyMoodDecayPerMinute());
+                             -m_config->getStudyMoodDecayPerMinute(),
+                             m_config->getStudyExpGainPerMinute(),
+                             0);
 }
 
 // 退出学习状态

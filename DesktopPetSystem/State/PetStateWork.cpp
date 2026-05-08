@@ -45,7 +45,9 @@ void PetStateWork::update()
     maybeLogMinuteSettlement(QStringLiteral("工作"),
                              -m_config->getWorkHungerDecayPerMinute(),
                              -m_config->getWorkEnergyDecayPerMinute(),
-                             -m_config->getWorkMoodDecayPerMinute());
+                             -m_config->getWorkMoodDecayPerMinute(),
+                             m_config->getWorkExpGainPerMinute(),
+                             m_config->getWorkCoinGainPerMinute());
 }
 
 // 退出工作状态

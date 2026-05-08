@@ -26,6 +26,8 @@ public:
 
 public slots:
     void setChatGenerating(bool generating);
+    /** 从 PetConfig 刷新占位符与字数上限（设置保存或 chat_runtime 同步后） */
+    void reloadChatInputLimit();
     void beginAssistantBubble();
     void appendAssistantBubbleDelta(const QString& text);
     void endAssistantBubble(bool success, bool userCancelled, const QString& errorMessage);
@@ -36,6 +38,7 @@ signals:
     void closed();
 
 private slots:
+    void updateInputCounterAndSendState();
     void onSendButtonClicked();
     void onInputReturnPressed();
     void onCancelButtonClicked();
@@ -67,6 +70,7 @@ private:
     QLineEdit* m_inputEdit = nullptr;
     QPushButton* m_sendButton = nullptr;
     QPushButton* m_cancelButton = nullptr;
+    QLabel* m_inputCounter = nullptr;
 
     QLabel* m_streamContentLabel = nullptr;
     bool m_isGenerating = false;

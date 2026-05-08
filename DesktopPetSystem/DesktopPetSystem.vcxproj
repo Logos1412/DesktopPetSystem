@@ -37,12 +37,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>5.14.2_msvc2017_64</QtInstall>
-    <QtModules>core;gui;multimedia;widgets;multimediawidgets;sql</QtModules>
+    <QtModules>core;gui;multimedia;widgets;multimediawidgets;sql;concurrent</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>5.14.2_msvc2017_64</QtInstall>
-    <QtModules>core;sql</QtModules>
+    <QtModules>core;sql;concurrent</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -107,6 +107,7 @@
     <QtMoc Include="Config\PetConfig.h" />
     <QtMoc Include="Widget\PetWidget.h" />
     <QtMoc Include="Widget\PetMenuWidget.h" />
+    <QtMoc Include="Widget\SettingsDialog.h" />
     <QtMoc Include="Widget\ChatWidget.h" />
     <QtMoc Include="Widget\AttributePanelWidget.h" />
     <QtMoc Include="Widget\FoodSelectWidget.h" />
@@ -129,6 +130,7 @@
     <ClCompile Include="Config\PetConfig.cpp" />
     <ClCompile Include="Widget\PetWidget.cpp" />
     <ClCompile Include="Widget\PetMenuWidget.cpp" />
+    <ClCompile Include="Widget\SettingsDialog.cpp" />
     <ClCompile Include="Widget\ChatWidget.cpp" />
     <ClCompile Include="Widget\AttributePanelWidget.cpp" />
     <ClCompile Include="Widget\FoodSelectWidget.cpp" />
@@ -143,6 +145,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\resources\config\pet_config.json" />
+    <None Include="..\resources\config\pet_config.defaults.json" />
+    <None Include="..\resources\config\chat_runtime_presets.json" />
     <None Include="..\resources\save\save_data.json" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -112,7 +112,14 @@ void PetMenuWidget::setupMenuStructure()
     m_subMenuItems[u8"面板"] = QStringList();
     m_subMenuItems[u8"互动"] = QStringList{ u8"学习", u8"玩耍", u8"工作", u8"睡觉" };
     m_subMenuItems[u8"对话"] = QStringList();
-    m_subMenuItems[u8"系统"] = QStringList{ u8"重置为首次启动", u8"退出" };
+    m_subMenuItems[u8"系统"] = QStringList{
+        u8"设置",
+        u8"更换桌面壁纸",
+        u8"导出存档",
+        u8"导入存档",
+        u8"重置为首次启动",
+        u8"退出",
+    };
     
     m_attrPanel = new AttributePanelWidget(m_petAttr, this);
     connect(m_attrPanel, &AttributePanelWidget::mouseEntered, this, [this]() {
@@ -257,23 +264,51 @@ bool PetMenuWidget::eventFilter(QObject* obj, QEvent* event)
     return QWidget::eventFilter(obj, event);
 }
 
-void PetMenuWidget::showAtPos(const QPoint& petPos)
+void PetMenuWidget::showAtPetRect(const QRect& petGlobalRect)
 {
-    QPoint menuPos = petPos + QPoint(0, 150);
-    this->move(menuPos);
-    this->show();
-    this->raise();
-    this->activateWindow();
+    adjustSize();
+    const int gap = 6;
+    const int w = width();
+    const int h = height();
+    int x = petGlobalRect.x() + (petGlobalRect.width() - w) / 2;
+    int y = petGlobalRect.y() + petGlobalRect.height() + gap;
+
+    QScreen* screen = QApplication::screenAt(QPoint(x + w / 2, y + h / 2));
+    if (!screen)
+        screen = QApplication::primaryScreen();
+    const QRect avail = screen->availableGeometry();
+
+    if (x + w > avail.right())
+        x = avail.right() - w + 1;
+    if (x < avail.left())
+        x = avail.left();
+    /* 下方放不下则改到宠物上方 */
+    if (y + h > avail.bottom())
+        y = petGlobalRect.y() - h - gap;
+    if (y < avail.top())
+        y = avail.top();
+
+    move(x, y);
+    show();
+    raise();
+    activateWindow();
 }
 
-void PetMenuWidget::toggleMenu(const QPoint& petPos)
+void PetMenuWidget::toggleMenu(const QRect& petGlobalRect)
 {
     if (this->isVisible()) {
         hide();
         hideSubMenu();
     }
     else {
-        showAtPos(petPos);
+        showAtPetRect(petGlobalRect);
+    }
+}
+
+void PetMenuWidget::refreshFoodsFromConfig()
+{
+    if (m_foodSelectWidget) {
+        m_foodSelectWidget->rebuildFoodListFromConfig();
     }
 }
 
@@ -298,6 +333,11 @@ void PetMenuWidget::toggleSubMenu(const QString& menuName)
 {
     QStringList items = m_subMenuItems.value(menuName);
     if (items.isEmpty()) {
+        /* 喂食：无二级列表，直接弹出选购；再次点击主栏「喂食」应关闭选购 */
+        if (menuName == u8"喂食" && m_foodSelectWidget && m_foodSelectWidget->isVisible()) {
+            m_foodSelectWidget->hide();
+            return;
+        }
         onSubMenuAction(menuName);
         return;
     }
@@ -359,7 +399,9 @@ void PetMenuWidget::onSubMenuAction(const QString& action)
         hideSubMenu();
     }
     else if (action == u8"对话") {
-        if (m_controller) m_controller->handleMenuAction(action);
+        if (m_controller) {
+            m_controller->handleMenuAction(action);
+        }
         hide();
         hideSubMenu();
     }
@@ -367,6 +409,26 @@ void PetMenuWidget::onSubMenuAction(const QString& action)
     // else if (action == u8"面板") {
     //     // 面板逻辑已移到eventFilter中
     // }
+    else if (action == u8"设置") {
+        emit openSettingsRequested();
+        hide();
+        hideSubMenu();
+    }
+    else if (action == u8"更换桌面壁纸") {
+        emit changeWallpaperRequested();
+        hide();
+        hideSubMenu();
+    }
+    else if (action == u8"导出存档") {
+        emit exportSaveRequested();
+        hide();
+        hideSubMenu();
+    }
+    else if (action == u8"导入存档") {
+        emit importSaveRequested();
+        hide();
+        hideSubMenu();
+    }
     else if (action == u8"重置为首次启动") {
         emit firstLaunchResetRequested();
         hide();

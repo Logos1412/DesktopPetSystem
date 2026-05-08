@@ -64,6 +64,7 @@ bool PetAttribute::loadFromFile(const QString& path)
 	m_mood = obj.value("mood").toInt(70);
 	m_coin = obj.value("coin").toInt(0);
 
+	emit attributeChanged();
 	return true;
 }
 
@@ -113,27 +114,27 @@ void PetAttribute::changeEnergy(int delta)
 	emit attributeChanged();
 }
 
-void PetAttribute::addExp(int exp)
+void PetAttribute::addExp(int exp, int* outLevelsGained)
 {
+	if (outLevelsGained)
+		*outLevelsGained = 0;
+
 	m_exp += exp;
-	qDebug() << "经验增加：" << exp
-		<< "当前经验：" << m_exp;
 
 	while (m_exp >= requiredExpForLevel(m_level)) {
-        int currentLevelRequiredExp = requiredExpForLevel(m_level);
+		const int currentLevelRequiredExp = requiredExpForLevel(m_level);
 		m_level++;
 		m_exp -= currentLevelRequiredExp;
-		qDebug() << "宠物升级！当前等级：" << m_level << "当前经验：" << m_exp;
+		if (outLevelsGained)
+			(*outLevelsGained)++;
 	}
 	emit attributeChanged();
 }
 
 void PetAttribute::changeCoin(int delta) {
-	int oldVal = m_coin;
 	m_coin += delta;
-	if (m_coin < 0) m_coin = 0;
-
-	qDebug() << "[属性变化] 金币：" << oldVal << "->" << m_coin;
+	if (m_coin < 0)
+		m_coin = 0;
 	emit attributeChanged();
 }
 

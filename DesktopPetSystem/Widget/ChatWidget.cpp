@@ -1,6 +1,7 @@
 #pragma execution_character_set("utf-8")
 
 #include "ChatWidget.h"
+#include "PetConfig.h"
 #include <QDebug>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -39,6 +40,7 @@ ChatWidget::ChatWidget(QWidget* parent)
     initStyle();
     initUI();
     initConnections();
+    reloadChatInputLimit();
 }
 
 void ChatWidget::initStyle()
@@ -146,14 +148,15 @@ void ChatWidget::initUI()
     // 输入区域
     QWidget* inputWidget = new QWidget(this);
     inputWidget->setStyleSheet("background-color: #f8f8f8; border-top: 1px solid #ddd;");
-    inputWidget->setFixedHeight(50);
+    auto* inputOuter = new QVBoxLayout(inputWidget);
+    inputOuter->setContentsMargins(8, 8, 8, 8);
+    inputOuter->setSpacing(4);
 
-    QHBoxLayout* inputLayout = new QHBoxLayout(inputWidget);
-    inputLayout->setContentsMargins(8, 8, 8, 8);
+    QHBoxLayout* inputLayout = new QHBoxLayout();
     inputLayout->setSpacing(8);
 
     m_inputEdit = new QLineEdit(this);
-    m_inputEdit->setPlaceholderText("输入内容...（回车发送，最大200字）");
+    m_inputEdit->setPlaceholderText(QStringLiteral("输入内容…"));
     m_inputEdit->setStyleSheet(
         "QLineEdit {"
         "    font-size: 12px;"
@@ -200,6 +203,12 @@ void ChatWidget::initUI()
     inputLayout->addWidget(m_inputEdit, 1);
     inputLayout->addWidget(m_cancelButton);
     inputLayout->addWidget(m_sendButton);
+    inputOuter->addLayout(inputLayout);
+
+    m_inputCounter = new QLabel(QStringLiteral("0 / 800"), inputWidget);
+    m_inputCounter->setStyleSheet(QStringLiteral("color: #888888; font-size: 11px;"));
+    m_inputCounter->setAlignment(Qt::AlignLeft);
+    inputOuter->addWidget(m_inputCounter);
 
     m_mainLayout->addWidget(inputWidget);
 }
@@ -208,8 +217,12 @@ void ChatWidget::initConnections()
 {
     connect(m_sendButton, &QPushButton::clicked, this, &ChatWidget::onSendButtonClicked);
     connect(m_cancelButton, &QPushButton::clicked, this, &ChatWidget::onCancelButtonClicked);
+    connect(m_inputEdit, &QLineEdit::textChanged, this, &ChatWidget::updateInputCounterAndSendState);
     connect(m_inputEdit, &QLineEdit::returnPressed, this, &ChatWidget::onInputReturnPressed);
     connect(m_closeButton, &QPushButton::clicked, this, &ChatWidget::onCloseButtonClicked);
+    PetConfig* cfg = PetConfig::getInstance();
+    connect(cfg, &PetConfig::configReloaded, this, &ChatWidget::reloadChatInputLimit);
+    connect(cfg, &PetConfig::chatRuntimeSynced, this, &ChatWidget::reloadChatInputLimit);
 }
 
 void ChatWidget::showAtPos(const QPoint& pos)
@@ -247,8 +260,35 @@ void ChatWidget::setChatGenerating(bool generating)
 {
     m_isGenerating = generating;
     m_inputEdit->setReadOnly(generating);
-    m_sendButton->setEnabled(!generating);
     m_cancelButton->setVisible(generating);
+    updateInputCounterAndSendState();
+}
+
+void ChatWidget::reloadChatInputLimit()
+{
+    PetConfig* petCfg = PetConfig::getInstance();
+    const int maxLen = petCfg->getChatMaxInputChars();
+    m_inputEdit->setPlaceholderText(
+        QStringLiteral("输入内容…（回车发送，最多 %1 字）").arg(maxLen));
+    m_inputCounter->setToolTip(
+        QStringLiteral(
+            "按字符计数，与接口侧的 token 上限不是同一概念。"
+            "更换模型后若常被服务端拒收或截断，可在设置·对话服务中调整「单次输入最大字符」。"));
+    updateInputCounterAndSendState();
+}
+
+void ChatWidget::updateInputCounterAndSendState()
+{
+    PetConfig* petCfg = PetConfig::getInstance();
+    const int maxLen = petCfg->getChatMaxInputChars();
+    const QString t = m_inputEdit->text();
+    const int n = t.length();
+    m_inputCounter->setText(QStringLiteral("%1 / %2").arg(n).arg(maxLen));
+    const bool over = n > maxLen;
+    m_inputCounter->setStyleSheet(over ? QStringLiteral("color: #c62828; font-size: 11px;")
+                                       : QStringLiteral("color: #888888; font-size: 11px;"));
+    const bool canSend = !m_isGenerating && !over && !t.trimmed().isEmpty();
+    m_sendButton->setEnabled(canSend);
 }
 
 void ChatWidget::beginAssistantBubble()
@@ -389,7 +429,11 @@ void ChatWidget::onSendButtonClicked()
     if (m_isGenerating) {
         return;
     }
-    QString input = m_inputEdit->text().trimmed();
+    const QString raw = m_inputEdit->text();
+    if (raw.length() > PetConfig::getInstance()->getChatMaxInputChars()) {
+        return;
+    }
+    QString input = raw.trimmed();
     if (!input.isEmpty()) {
         addChatMessage("你", input, true);
         emit userInput(input);

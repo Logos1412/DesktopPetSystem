@@ -19,3 +19,6 @@ encoding_convert_log*
 **/ui_*.h
 **/qrc_*.cpp
 resources/save/chat_input.json
+
+# 本地配置（可含密钥）；仓库只保留 pet_config.defaults.json，首次运行会从模板复制生成
+resources/config/pet_config.json
