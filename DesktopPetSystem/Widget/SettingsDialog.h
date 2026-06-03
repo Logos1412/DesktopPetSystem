@@ -18,6 +18,8 @@ public:
 signals:
     /** 在设置窗口内保存了聊天记忆文件后发出，供正在对话的状态重载记忆 */
     void chatMemoryEdited();
+    /** 仅在「聊天记忆」页点击清除对话消息后发出：清空 messages，不重载四槽编辑框内容 */
+    void chatMessagesCleared();
 
 private slots:
     void onSave();

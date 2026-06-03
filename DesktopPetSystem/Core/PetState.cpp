@@ -71,6 +71,33 @@ void PetState::maybeLogMinuteSettlement(const QString& stateLabel,
     m_settlementBaseCoin = c;
 }
 
+void PetState::logExitSettlement(const QString& stateLabel)
+{
+    if (!m_attr) return;
+    if (m_periodicSettlementTicks == 0) return; // enter() 刚调用还没 tick 过，无变化可报
+
+    const int h = m_attr->getHunger();
+    const int e = m_attr->getEnergy();
+    const int m = m_attr->getMood();
+    const int x = m_attr->getExp();
+    const int lv = m_attr->getLevel();
+    const int c = m_attr->getCoin();
+    const int levelGain = lv - m_settlementBaseLevel;
+
+    const int dh = h - m_settlementBaseHunger;
+    const int de = e - m_settlementBaseEnergy;
+    const int dm = m - m_settlementBaseMood;
+    const int dx = x - m_settlementBaseExp;
+    const int dc = c - m_settlementBaseCoin;
+
+    qDebug() << "[退出结算]" << stateLabel << "| 持续" << m_periodicSettlementTicks << "秒"
+             << "| 饱食" << dh << "精力" << de << "心情" << dm
+             << "经验" << dx << "金币" << dc
+             << "| 结算前" << m_settlementBaseHunger << m_settlementBaseEnergy << m_settlementBaseMood
+             << m_settlementBaseExp << m_settlementBaseCoin << "→ 结算后" << h << e << m << x << c
+             << "| 升级：" << levelGain;
+}
+
 int PetState::slicePerSecondFromRatePerMinute(int ratePerMinute, int& remainder)
 {
     remainder += ratePerMinute;

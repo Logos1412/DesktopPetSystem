@@ -52,6 +52,7 @@ void PetStateStudy::update()
 void PetStateStudy::exit()
 {
     qDebug() << "退出学习状态";
+    logExitSettlement(QStringLiteral("学习"));
     m_updateTimer->stop();
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateStudy::update);
 }

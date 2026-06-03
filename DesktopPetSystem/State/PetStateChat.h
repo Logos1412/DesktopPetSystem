@@ -68,6 +68,13 @@ private:
     QJsonArray buildHistoryPayload() const;
     void tryCompressOldTurns();
 
+    void stopTtsPlayback();
+    bool requestTtsForReply(const QString& text);
+    void onTtsProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void startDeferredAssistantDisplay(const QString& fullText, int audioDurationMs);
+    void stopDeferredAssistantDisplay(bool markCancelled);
+    void onDeferredAssistantDisplayTick();
+
     QJsonObject structuredMemoryToJson() const;
     void applyStructuredMemoryFromJson(const QJsonObject& o);
     void clearStructuredMemory();
@@ -91,4 +98,15 @@ private:
     QString m_assistantStreamingBuffer;
     QString m_pendingDoneReply;
     QByteArray m_chatStdinPending;
+
+    QProcess* m_ttsProcess = nullptr;
+    class QMediaPlayer* m_ttsPlayer = nullptr;
+    QString m_ttsTempWavPath;
+    QByteArray m_ttsStdinPending;
+
+    bool m_deferAssistantDisplayUntilTtsReady = false;
+    bool m_waitingDeferredAssistantDisplay = false;
+    QString m_deferredAssistantText;
+    QTimer* m_deferredAssistantTimer = nullptr;
+    int m_deferredAssistantIndex = 0;
 };

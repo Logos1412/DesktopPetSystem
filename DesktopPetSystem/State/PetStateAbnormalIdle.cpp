@@ -49,6 +49,7 @@ void PetStateAbnormalIdle::update()
 void PetStateAbnormalIdle::exit()
 {
     qDebug() << "退出异常待机状态";
+    logExitSettlement(QStringLiteral("异常待机"));
     m_updateTimer->stop();
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateAbnormalIdle::update);
 }

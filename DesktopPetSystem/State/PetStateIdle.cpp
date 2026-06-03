@@ -4,26 +4,21 @@
 #include "PetFSM.h"
 #include "PetAttribute.h"
 #include "PetConfig.h"
+#include "PetVirtualPath.h"
 
-#include <QCoreApplication>
 #include <QDir>
 #include <QRandomGenerator>
 #include <QStringList>
 #include <QDebug>
 
 namespace {
-QString projectRootPath()
-{
-    QString appDir = QCoreApplication::applicationDirPath();
-    QDir dir(appDir);
-    dir.cdUp();
-    dir.cdUp();
-    return dir.absolutePath();
-}
 
 QString pickRandomIdleDoubleClickRelativePath()
 {
-    const QString dirPath = QDir(projectRootPath()).absoluteFilePath(QStringLiteral("resources/animations/Idle/double_click"));
+    const QString root = PetVirtualPath::findProjectRootFromExe();
+    const QString dirPath = PetVirtualPath::resolveToAbsolute(
+        PetVirtualPath::toVirtual(QStringLiteral("resources/animations/Idle/double_click")),
+        root);
     QDir d(dirPath);
     const QStringList files = d.entryList(QStringList() << QStringLiteral("*.gif"), QDir::Files, QDir::Name);
     if (files.isEmpty()) {
@@ -76,6 +71,7 @@ void PetStateIdle::update()
 void PetStateIdle::exit()
 {
     qDebug() << "退出正常待机状态";
+    logExitSettlement(QStringLiteral("正常待机"));
     m_updateTimer->stop();
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateIdle::update);
 }

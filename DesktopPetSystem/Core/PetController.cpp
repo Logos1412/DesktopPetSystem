@@ -22,23 +22,23 @@ bool PetController::handleMenuAction(const QString& action) const
     }
 
     if (action == u8"学习") {
-        m_petFsm->changeState(PetStateType::Study);
+        m_petFsm->changeState(m_petFsm->currentState() == PetStateType::Study ? PetStateType::Idle : PetStateType::Study);
         return true;
     }
     if (action == u8"玩耍") {
-        m_petFsm->changeState(PetStateType::Play);
+        m_petFsm->changeState(m_petFsm->currentState() == PetStateType::Play ? PetStateType::Idle : PetStateType::Play);
         return true;
     }
     if (action == u8"工作") {
-        m_petFsm->changeState(PetStateType::Work);
+        m_petFsm->changeState(m_petFsm->currentState() == PetStateType::Work ? PetStateType::Idle : PetStateType::Work);
         return true;
     }
     if (action == u8"睡觉") {
-        m_petFsm->changeState(PetStateType::Sleep);
+        m_petFsm->changeState(m_petFsm->currentState() == PetStateType::Sleep ? PetStateType::Idle : PetStateType::Sleep);
         return true;
     }
     if (action == u8"对话") {
-        m_petFsm->changeState(PetStateType::Chat);
+        m_petFsm->changeState(m_petFsm->currentState() == PetStateType::Chat ? PetStateType::Idle : PetStateType::Chat);
         return true;
     }
     if (action == u8"退出") {

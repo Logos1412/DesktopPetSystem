@@ -73,6 +73,8 @@ protected:
                                   int expectedDm,
                                   int expectedDexp = 0,
                                   int expectedDcoin = 0);
+    /** 退出状态时输出一条 [退出结算]，记录自上次结算快照以来的变化量（不足 60s 也能看到） */
+    void logExitSettlement(const QString& stateLabel);
 
     PetFSM* m_fsm;              // 状态机指针
     PetAttribute* m_attr;       // 属性指针

@@ -6,6 +6,7 @@
 #include "Config/PetConfig.h"
 
 #include <QDebug>
+#include <QTimer>
 
 // 进入睡眠状态
 void PetStateSleep::enter()
@@ -19,6 +20,16 @@ void PetStateSleep::enter()
 
     // 先播放入睡动画（一轮结束后切到睡眠中循环）
     emit requestPlayAnimation("Sleep/Sleep.gif", true, true);
+
+    /* 部分 GIF 在回绕到第 0 帧时 QMovie 不发 frameChanged，仅靠轮询/超时兜底 */
+    QTimer::singleShot(10000, this, [this]() {
+        if (m_fsm->currentState() != PetStateType::Sleep)
+            return;
+        if (m_isSleeping)
+            return;
+        qWarning() << "[睡眠] 入睡动画长时间未结束，强制切换熟睡循环";
+        onFallAsleepIntroFinished();
+    });
 
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateSleep::update);
     connect(m_updateTimer, &QTimer::timeout, this, &PetStateSleep::update);
@@ -59,6 +70,7 @@ void PetStateSleep::update()
 void PetStateSleep::exit()
 {
     qDebug() << "退出睡眠状态";
+    logExitSettlement(QStringLiteral("睡眠"));
     m_updateTimer->stop();
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateSleep::update);
     m_sleepCount = 0;
@@ -70,8 +82,9 @@ void PetStateSleep::onFallAsleepIntroFinished()
     if (m_isSleeping)
         return;
     m_isSleeping = true;
-    emit requestPlayAnimation("Sleep/Sleeping.gif", true, false);
-    qDebug() << "[睡眠] 切换到睡眠中动画";
+    /* 入睡过渡只播一轮；熟睡循环 GIF，非单次 */
+    emit requestPlayAnimation(QStringLiteral("Sleep/Sleeping.gif"), false, false);
+    qDebug() << "[睡眠] 切换到睡眠中循环动画";
 }
 
 // 双击交互

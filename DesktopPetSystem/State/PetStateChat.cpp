@@ -3,7 +3,10 @@
 #include "PetStateChat.h"
 #include "PetFSM.h"
 #include "PetAttribute.h"
+#include "Core/PetInferenceServices.h"
+#include "Core/PetOllamaLauncher.h"
 #include "Config/PetConfig.h"
+#include "Config/PetVirtualPath.h"
 #include <QStringList>
 
 #include <QDebug>
@@ -13,7 +16,6 @@
 #include <QJsonArray>
 #include <QJsonValue>
 #include <QJsonParseError>
-#include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QDir>
@@ -27,88 +29,17 @@
 #include <QUrl>
 #include <QtConcurrent/QtConcurrent>
 #include <QFutureWatcher>
+#include <QMediaPlayer>
 
 namespace {
-QString resolveProjectRootPath()
-{
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int i = 0; i < 6; ++i) {
-        if (QFile::exists(dir.absoluteFilePath("resources/config/pet_config.json"))) {
-            return dir.absolutePath();
-        }
-        if (!dir.cdUp()) {
-            break;
-        }
-    }
-    return QCoreApplication::applicationDirPath();
-}
-
 QString absoluteChatMemoryPathFromConfig()
 {
     PetConfig* cfg = PetConfig::getInstance();
-    const QString rel = cfg->getChatMemoryPath();
-    const QString root = resolveProjectRootPath();
-    if (QDir::isRelativePath(rel)) {
-        return QDir(root).absoluteFilePath(rel);
-    }
-    return rel;
+    const QString stored = cfg->getChatMemoryPath();
+    const QString root = PetVirtualPath::findProjectRootFromExe();
+    return PetVirtualPath::resolveToAbsolute(stored, root);
 }
 
-bool queryOllamaTagsOk(const QString& hostBase, QString* detailOut)
-{
-    QString base = hostBase.trimmed();
-    if (base.isEmpty()) {
-        base = QStringLiteral("http://127.0.0.1:11434");
-    }
-    if (!base.endsWith(QLatin1Char('/'))) {
-        base += QLatin1Char('/');
-    }
-    const QUrl url(base + QStringLiteral("api/tags"));
-
-    QNetworkAccessManager nam;
-    QNetworkRequest req(url);
-    QNetworkReply* reply = nam.get(req);
-
-    QEventLoop loop;
-    QTimer timer;
-    timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, [&]()
-                     {
-                         timer.stop();
-                         loop.quit();
-                     });
-    timer.start(4000);
-    loop.exec(QEventLoop::ExcludeUserInputEvents);
-
-    if (reply->isRunning()) {
-        reply->abort();
-        if (detailOut) {
-            *detailOut = QStringLiteral("连接超时（约 4 秒）。请确认 Ollama 已启动并监听 11434。");
-        }
-        reply->deleteLater();
-        return false;
-    }
-
-    if (reply->error() != QNetworkReply::NoError) {
-        if (detailOut) {
-            *detailOut = reply->errorString();
-        }
-        reply->deleteLater();
-        return false;
-    }
-
-    const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    if (statusCode != 200 && statusCode != 0) {
-        if (detailOut) {
-            *detailOut = QStringLiteral("HTTP %1").arg(statusCode);
-        }
-        reply->deleteLater();
-        return false;
-    }
-    reply->deleteLater();
-    return true;
-}
 }
 
 /** 在后台线程中调用：跑 Python summarize_structured，返回 memory 对象 */
@@ -214,6 +145,12 @@ static QJsonObject runStructuredSummarizeWorker(const QString& dialogueChunk,
 
 PetStateChat::~PetStateChat()
 {
+    stopDeferredAssistantDisplay(true);
+    stopTtsPlayback();
+    if (m_ttsPlayer) {
+        m_ttsPlayer->deleteLater();
+        m_ttsPlayer = nullptr;
+    }
     if (m_process) {
         m_process->kill();
         m_process->deleteLater();
@@ -228,12 +165,11 @@ void PetStateChat::enter()
     /* 仅在使用本地 Ollama 时预检；云端 openai_compatible 不访问 11434 */
     if (cfg->getChatProvider() == QStringLiteral("ollama")) {
         QString errDetail;
-        if (!queryOllamaTagsOk(cfg->getChatOllamaHost(), &errDetail)) {
-            /* 先退回 Idle（避免未完成 enter）；提示用单次定时延后，绕过 changeState 重入期间的 UI 抖动 */
+        if (!PetOllamaLauncher::queryTagsOk(cfg->getChatOllamaHost(), &errDetail)) {
+            ensureConfiguredInferenceServicesAtStartup();
             m_fsm->changeState(PetStateType::Idle);
-            const QString msg = QStringLiteral(
-                                    "请先启动 Ollama，或检查配置文件中的 chat_runtime.ollama_host。\n\n")
-                                + errDetail.trimmed();
+            const QString msg =
+                QStringLiteral("Ollama 尚未就绪，已在后台尝试启动，请稍后再进入聊天。\n\n") + errDetail.trimmed();
             QTimer::singleShot(0, this, [this, msg]() { emit chatOllamaPrefetchFailed(msg); });
             return;
         }
@@ -281,8 +217,263 @@ void PetStateChat::exit()
     m_aiAssistantBubbleShown = false;
     m_userCancelled = false;
     m_finalizeDone = false;
+    m_deferAssistantDisplayUntilTtsReady = false;
+    m_waitingDeferredAssistantDisplay = false;
     m_assistantStreamingBuffer.clear();
     m_pendingDoneReply.clear();
+
+    stopDeferredAssistantDisplay(true);
+    stopTtsPlayback();
+}
+
+void PetStateChat::stopTtsPlayback()
+{
+    if (m_ttsProcess) {
+        disconnect(m_ttsProcess, nullptr, this, nullptr);
+        if (m_ttsProcess->state() != QProcess::NotRunning) {
+            m_ttsProcess->kill();
+        }
+        m_ttsProcess->deleteLater();
+        m_ttsProcess = nullptr;
+    }
+    m_ttsStdinPending.clear();
+
+    if (m_ttsPlayer) {
+        m_ttsPlayer->stop();
+    }
+    if (!m_ttsTempWavPath.isEmpty()) {
+        QFile::remove(m_ttsTempWavPath);
+        m_ttsTempWavPath.clear();
+    }
+}
+
+bool PetStateChat::requestTtsForReply(const QString& text)
+{
+    PetConfig* cfg = PetConfig::getInstance();
+    if (!cfg->isTtsGptsovitsEnabled()) {
+        return false;
+    }
+
+    QString trimmed = text.trimmed();
+    if (trimmed.isEmpty() || trimmed == QString::fromUtf8("\u2026")) {
+        return false;
+    }
+
+    const QString root = PetVirtualPath::findProjectRootFromExe();
+    const QString scriptPath =
+        PetVirtualPath::resolveToAbsolute(cfg->getTtsGptsovitsScriptPath(), root);
+    const QString refPath =
+        PetVirtualPath::resolveToAbsolute(cfg->getTtsGptsovitsRefAudioPath(), root);
+
+    if (!QFileInfo::exists(scriptPath)) {
+        qWarning() << "[TTS] 脚本不存在:" << scriptPath;
+        return false;
+    }
+    if (!QFileInfo::exists(refPath)) {
+        qWarning() << "[TTS] 参考音频不存在:" << refPath;
+        return false;
+    }
+    if (cfg->getTtsGptsovitsPromptText().trimmed().isEmpty()) {
+        qWarning() << "[TTS] prompt_text 未配置";
+        return false;
+    }
+
+    stopTtsPlayback();
+
+    QJsonObject req;
+    req.insert(QStringLiteral("base_url"), cfg->getTtsGptsovitsBaseUrl());
+    req.insert(QStringLiteral("text"), trimmed);
+    req.insert(QStringLiteral("ref_audio_path"), refPath);
+    req.insert(QStringLiteral("prompt_text"), cfg->getTtsGptsovitsPromptText());
+    req.insert(QStringLiteral("text_lang"), cfg->getTtsGptsovitsTextLang());
+    req.insert(QStringLiteral("prompt_lang"), cfg->getTtsGptsovitsPromptLang());
+    req.insert(QStringLiteral("max_chars"), cfg->getTtsGptsovitsMaxChars());
+    req.insert(QStringLiteral("strip_parentheses"), cfg->isTtsGptsovitsStripParentheses());
+
+    m_ttsStdinPending = QJsonDocument(req).toJson(QJsonDocument::Compact);
+
+    m_ttsProcess = new QProcess(this);
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
+    env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
+    env.insert(QStringLiteral("PYTHONUNBUFFERED"), QStringLiteral("1"));
+    m_ttsProcess->setProcessEnvironment(env);
+
+    connect(m_ttsProcess, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this, &PetStateChat::onTtsProcessFinished, Qt::UniqueConnection);
+    connect(m_ttsProcess, &QProcess::started, this, [this]() {
+        if (!m_ttsProcess || m_ttsStdinPending.isEmpty()) {
+            return;
+        }
+        m_ttsProcess->write(m_ttsStdinPending);
+        m_ttsProcess->closeWriteChannel();
+        m_ttsStdinPending.clear();
+    });
+
+    QString pythonExecutable = cfg->getPythonPath().trimmed();
+    if (pythonExecutable.isEmpty()) {
+        pythonExecutable = QStringLiteral("python3");
+    }
+    const QFileInfo pythonInfo(pythonExecutable);
+    if (pythonInfo.isAbsolute() && !pythonInfo.exists()) {
+        pythonExecutable = QStringLiteral("python3");
+    }
+
+    qDebug() << "[TTS] 启动合成:" << pythonExecutable << scriptPath;
+    m_ttsProcess->start(pythonExecutable, QStringList() << scriptPath);
+    return true;
+}
+
+void PetStateChat::onTtsProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    QProcess* proc = m_ttsProcess;
+    if (!proc) {
+        return;
+    }
+
+    const QByteArray stdoutBytes = proc->readAllStandardOutput();
+    const QByteArray stderrBytes = proc->readAllStandardError();
+    m_ttsProcess = nullptr;
+    proc->deleteLater();
+    const bool needDeferredFallback = m_waitingDeferredAssistantDisplay;
+
+    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+        qWarning() << "[TTS] 子进程异常退出" << exitCode << stderrBytes;
+        if (needDeferredFallback) {
+            startDeferredAssistantDisplay(m_deferredAssistantText, 0);
+        }
+        return;
+    }
+
+    const QString line = QString::fromUtf8(stdoutBytes).trimmed();
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &err);
+    if (!doc.isObject()) {
+        qWarning() << "[TTS] 输出解析失败:" << err.errorString() << line << stderrBytes;
+        if (needDeferredFallback) {
+            startDeferredAssistantDisplay(m_deferredAssistantText, 0);
+        }
+        return;
+    }
+
+    const QJsonObject o = doc.object();
+    if (!o.value(QStringLiteral("ok")).toBool(false)) {
+        qWarning() << "[TTS] 合成失败:" << o.value(QStringLiteral("error")).toString() << stderrBytes;
+        if (needDeferredFallback) {
+            startDeferredAssistantDisplay(m_deferredAssistantText, 0);
+        }
+        return;
+    }
+
+    const QString wavPath = o.value(QStringLiteral("wav_path")).toString();
+    if (wavPath.isEmpty() || !QFileInfo::exists(wavPath)) {
+        qWarning() << "[TTS] 无效 wav_path:" << wavPath;
+        if (needDeferredFallback) {
+            startDeferredAssistantDisplay(m_deferredAssistantText, 0);
+        }
+        return;
+    }
+
+    if (!m_ttsPlayer) {
+        m_ttsPlayer = new QMediaPlayer(this);
+    }
+    m_ttsTempWavPath = wavPath;
+    m_ttsPlayer->setMedia(QUrl::fromLocalFile(wavPath));
+    m_ttsPlayer->play();
+    qDebug() << "[TTS] 播放:" << wavPath;
+
+    if (m_waitingDeferredAssistantDisplay) {
+        startDeferredAssistantDisplay(m_deferredAssistantText, m_ttsPlayer->duration());
+    }
+}
+
+void PetStateChat::startDeferredAssistantDisplay(const QString& fullText, int audioDurationMs)
+{
+    m_waitingDeferredAssistantDisplay = false;
+    m_deferredAssistantText = fullText;
+    m_deferredAssistantIndex = 0;
+    if (m_deferredAssistantText.isEmpty()) {
+        emit chatBusyChanged(false);
+        if (m_aiAssistantBubbleShown) {
+            emit chatAssistantFinished(true, false, QString());
+            m_aiAssistantBubbleShown = false;
+        }
+        return;
+    }
+
+    if (!m_aiAssistantBubbleShown) {
+        m_aiAssistantBubbleShown = true;
+        emit chatAssistantStarted();
+    }
+
+    if (!m_deferredAssistantTimer) {
+        m_deferredAssistantTimer = new QTimer(this);
+        connect(m_deferredAssistantTimer, &QTimer::timeout,
+                this, &PetStateChat::onDeferredAssistantDisplayTick, Qt::UniqueConnection);
+    }
+
+    const int textLen = qMax(1, m_deferredAssistantText.size());
+    int durationMs = audioDurationMs;
+    if (durationMs <= 0 && m_ttsPlayer) {
+        durationMs = m_ttsPlayer->duration();
+    }
+    if (durationMs <= 0) {
+        durationMs = qBound(1200, textLen * 70, 15000);
+    }
+    const int intervalMs = qBound(18, durationMs / textLen, 90);
+    m_deferredAssistantTimer->start(intervalMs);
+}
+
+void PetStateChat::stopDeferredAssistantDisplay(bool markCancelled)
+{
+    const bool hadPendingDisplay =
+        m_waitingDeferredAssistantDisplay || (m_deferredAssistantTimer && m_deferredAssistantTimer->isActive());
+    m_waitingDeferredAssistantDisplay = false;
+    m_deferredAssistantText.clear();
+    m_deferredAssistantIndex = 0;
+    if (m_deferredAssistantTimer) {
+        m_deferredAssistantTimer->stop();
+    }
+    if (markCancelled && hadPendingDisplay) {
+        emit chatBusyChanged(false);
+        if (m_aiAssistantBubbleShown) {
+            emit chatAssistantFinished(false, true, QString());
+            m_aiAssistantBubbleShown = false;
+        }
+    }
+}
+
+void PetStateChat::onDeferredAssistantDisplayTick()
+{
+    if (!m_deferredAssistantTimer || m_deferredAssistantText.isEmpty()) {
+        return;
+    }
+    if (m_deferredAssistantIndex >= m_deferredAssistantText.size()) {
+        m_deferredAssistantTimer->stop();
+        m_deferredAssistantText.clear();
+        m_deferredAssistantIndex = 0;
+        emit chatBusyChanged(false);
+        if (m_aiAssistantBubbleShown) {
+            emit chatAssistantFinished(true, false, QString());
+            m_aiAssistantBubbleShown = false;
+        }
+        return;
+    }
+
+    const QString ch = m_deferredAssistantText.mid(m_deferredAssistantIndex, 1);
+    ++m_deferredAssistantIndex;
+    emit chatAssistantDelta(ch);
+
+    if (m_deferredAssistantIndex >= m_deferredAssistantText.size()) {
+        m_deferredAssistantTimer->stop();
+        m_deferredAssistantText.clear();
+        m_deferredAssistantIndex = 0;
+        emit chatBusyChanged(false);
+        if (m_aiAssistantBubbleShown) {
+            emit chatAssistantFinished(true, false, QString());
+            m_aiAssistantBubbleShown = false;
+        }
+    }
 }
 
 void PetStateChat::finalizeAiReply(bool assistantBubbleWasShown,
@@ -296,8 +487,6 @@ void PetStateChat::finalizeAiReply(bool assistantBubbleWasShown,
     m_finalizeDone = true;
     m_waitingForAiResponse = false;
 
-    emit chatBusyChanged(false);
-
     QString assistantTextSaved;
     if (success && !userCancelled) {
         assistantTextSaved = m_assistantStreamingBuffer.trimmed();
@@ -309,8 +498,25 @@ void PetStateChat::finalizeAiReply(bool assistantBubbleWasShown,
         }
     }
 
-    /* 先结束流式气泡 UI；避免在其后再做存档/摘要导致界面长时间停在「生成中」 */
-    emit chatAssistantFinished(success, userCancelled, errorMessage);
+    const bool useDeferredDisplay =
+        success && !userCancelled && m_deferAssistantDisplayUntilTtsReady && !assistantTextSaved.isEmpty();
+    if (!useDeferredDisplay) {
+        emit chatBusyChanged(false);
+        /* 常规模式：生成完成即结束流式气泡 */
+        emit chatAssistantFinished(success, userCancelled, errorMessage);
+    } else {
+        /* 同步模式：等 TTS 合成完成后再开始流式显示，期间保持「生成中」 */
+        m_waitingDeferredAssistantDisplay = true;
+        m_deferredAssistantText = assistantTextSaved;
+        const bool ttsStarted = requestTtsForReply(assistantTextSaved);
+        if (!ttsStarted) {
+            startDeferredAssistantDisplay(assistantTextSaved, 0);
+        }
+    }
+
+    if (!useDeferredDisplay && success && !userCancelled && !assistantTextSaved.isEmpty()) {
+        requestTtsForReply(assistantTextSaved);
+    }
 
     if (success && !userCancelled) {
         PetConfig* cfg = PetConfig::getInstance();
@@ -356,7 +562,9 @@ void PetStateChat::finalizeAiReply(bool assistantBubbleWasShown,
         emit showChatReply(fallback);
     }
 
-    m_aiAssistantBubbleShown = false;
+    if (!useDeferredDisplay) {
+        m_aiAssistantBubbleShown = false;
+    }
     m_userCancelled = false;
     m_assistantStreamingBuffer.clear();
     m_pendingDoneReply.clear();
@@ -391,7 +599,9 @@ void PetStateChat::flushStdoutLines()
             const QString delta = obj.value(QStringLiteral("content")).toString();
             if (!delta.isEmpty()) {
                 m_assistantStreamingBuffer += delta;
-                emit chatAssistantDelta(delta);
+                if (!m_deferAssistantDisplayUntilTtsReady) {
+                    emit chatAssistantDelta(delta);
+                }
             }
         } else if (event == QStringLiteral("done")) {
             const bool success = obj.value(QStringLiteral("success")).toBool();
@@ -401,7 +611,9 @@ void PetStateChat::flushStdoutLines()
             const bool bubble = m_aiAssistantBubbleShown;
             if (!success && bubble && !replyFallback.isEmpty()) {
                 m_assistantStreamingBuffer += replyFallback;
-                emit chatAssistantDelta(replyFallback);
+                if (!m_deferAssistantDisplayUntilTtsReady) {
+                    emit chatAssistantDelta(replyFallback);
+                }
                 errMsg.clear();
             }
             finalizeAiReply(bubble,
@@ -417,7 +629,9 @@ void PetStateChat::flushStdoutLines()
             const bool bubble = m_aiAssistantBubbleShown;
             if (bubble && !reply.isEmpty()) {
                 m_assistantStreamingBuffer += reply;
-                emit chatAssistantDelta(reply);
+                if (!m_deferAssistantDisplayUntilTtsReady) {
+                    emit chatAssistantDelta(reply);
+                }
             }
             finalizeAiReply(bubble,
                             success,
@@ -462,7 +676,7 @@ void PetStateChat::onAiProcessStarted()
 {
     deliverChatStdinPayload();
 
-    if (m_waitingForAiResponse && !m_aiAssistantBubbleShown) {
+    if (m_waitingForAiResponse && !m_aiAssistantBubbleShown && !m_deferAssistantDisplayUntilTtsReady) {
         m_aiAssistantBubbleShown = true;
         emit chatAssistantStarted();
     }
@@ -480,6 +694,8 @@ void PetStateChat::onProcessStdout()
 
 void PetStateChat::onUserInput(const QString& input)
 {
+    stopDeferredAssistantDisplay(true);
+    stopTtsPlayback();
     qDebug() << "[聊天] 用户输入:" << input;
 
     if (input.length() > 200) {
@@ -499,13 +715,16 @@ void PetStateChat::onUserInput(const QString& input)
     PetConfig* config = PetConfig::getInstance();
     /* 每次发送前从磁盘再读 chat_runtime，避免人设/API 与 pet_config.json 不一致（多份路径、仅改文件未热载等） */
     config->reloadChatRuntimeFromFile();
+    m_deferAssistantDisplayUntilTtsReady =
+        config->isTtsGptsovitsEnabled() && config->isTtsDisplayTextAfterSynthesis();
+    m_waitingDeferredAssistantDisplay = false;
+    m_deferredAssistantText.clear();
+    m_deferredAssistantIndex = 0;
 
-    const QString projectRootPath = resolveProjectRootPath();
+    const QString projectRootPath = PetVirtualPath::findProjectRootFromExe();
 
     QString scriptPath = config->getChatScriptPath();
-    if (QDir::isRelativePath(scriptPath)) {
-        scriptPath = QDir(projectRootPath).absoluteFilePath(scriptPath);
-    }
+    scriptPath = PetVirtualPath::resolveToAbsolute(scriptPath, projectRootPath);
     if (!QFile::exists(scriptPath)) {
         emit showChatReply(QStringLiteral("聊天脚本不存在，请检查 chat_runtime.script_path 配置。"));
         return;
@@ -600,6 +819,15 @@ void PetStateChat::onUserInput(const QString& input)
 
 void PetStateChat::cancelCurrentChat()
 {
+    const bool hadDeferredDisplay =
+        m_waitingDeferredAssistantDisplay || (m_deferredAssistantTimer && m_deferredAssistantTimer->isActive());
+    if (hadDeferredDisplay) {
+        stopDeferredAssistantDisplay(true);
+    }
+    stopTtsPlayback();
+    if (hadDeferredDisplay) {
+        return;
+    }
     if (!m_waitingForAiResponse || !m_process || m_process->state() == QProcess::NotRunning) {
         return;
     }
@@ -934,13 +1162,23 @@ void PetStateChat::tryCompressOldTurns()
                                                 + m_memoryAvoid.size() + m_memoryFacts.size());
     const int memThresh = cfg->getChatSummaryCompressAfterMemoryChars();
     const bool overMem = (memThresh > 0 && memChars >= static_cast<qint64>(memThresh));
-    const bool overTurns = (pairs > trigger);
+    /* 触发阈值：问答「对」数达到配置值即考虑合并（原为 > 导致整数值差一轮，例如 12 要攒满 13 对才触发） */
+    const bool overTurns = (trigger > 0 && pairs >= trigger);
     if (!overTurns && !overMem) {
         return;
     }
 
     const int removePairs = pairs - keep;
     if (removePairs <= 0) {
+        /* 常见误配：summary_compress_after_turns 小于 summary_keep_recent_turns 时，会出现
+           「已达轮数阈值但对数仍不大于保留窗口」从而永远无法裁旧轮；仅打日志便于排查。 */
+        if (overTurns && pairs <= keep) {
+            qWarning() << "[结构化摘要] 当前问答对数" << pairs
+                       << "已达到触发阈值" << trigger
+                       << "，但 summary_keep_recent_turns（按「问答对」计，不是消息条数）为"
+                       << keep << "，可删除的旧对数为 0。请继续对话使对数大于"
+                       << keep << "，或调低保留值 / 调整两参数关系（通常保留应小于触发或接近）。";
+        }
         if (overMem && memThresh > 0) {
             qWarning() << "[结构化摘要] 记忆体积超阈值但无可合并的旧轮次，对各槽位截断至约 2/3 上限";
             const QJsonObject lim = cfg->getStructuredMemoryLimitsJson();
@@ -970,11 +1208,9 @@ void PetStateChat::tryCompressOldTurns()
         chunk += QLatin1Char('\n');
     }
 
-    const QString projectRootPath = resolveProjectRootPath();
+    const QString projectRootPath = PetVirtualPath::findProjectRootFromExe();
     QString scriptPath = cfg->getChatScriptPath();
-    if (QDir::isRelativePath(scriptPath)) {
-        scriptPath = QDir(projectRootPath).absoluteFilePath(scriptPath);
-    }
+    scriptPath = PetVirtualPath::resolveToAbsolute(scriptPath, projectRootPath);
     if (!QFile::exists(scriptPath)) {
         qWarning() << "[结构化摘要] 脚本不存在";
         return;

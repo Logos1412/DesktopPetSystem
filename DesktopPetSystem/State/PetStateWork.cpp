@@ -54,6 +54,7 @@ void PetStateWork::update()
 void PetStateWork::exit()
 {
     qDebug() << "退出工作状态";
+    logExitSettlement(QStringLiteral("工作"));
     m_updateTimer->stop();
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStateWork::update);
 }

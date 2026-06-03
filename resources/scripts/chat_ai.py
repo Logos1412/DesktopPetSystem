@@ -37,6 +37,58 @@ APPEARANCE_WRITING_GUARDRAIL = """【外貌与动作描写约束】除非人设�
 OUTPUT_STYLE_GUARDRAIL = """【回复格式】默认不使用括号内的舞台说明、动作旁白或心理描写（例如「（笑）」「（小声）」「（歪头）」）；用自然口语直接回复即可。
 仅在用户明确要求使用括号动作描写或剧本格式时，再采用该类写法。"""
 
+# 点餐/外卖场景：避免只靠近期闲聊而忽略结构化记忆中的忌口
+MEAL_RECOMMEND_GUARDRAIL = (
+    "【饮食与推荐】若用户提到外卖、点餐、喝什么、吃什么，须同时核对下方「结构化记忆」与历史中的"
+    "过敏/不耐受（如乳糖不耐）、忌口、近期饮食计划（如清淡、鸡胸肉）；禁止主动推荐会触犯上述禁忌的食物。"
+    "若记忆中未写明饮食禁忌但本轮对话刚提过，仍须在回复中遵守本轮明确陈述。"
+)
+
+
+def choose_adaptive_reply_budget(user_input, configured_max_tokens):
+    """
+    按用户输入复杂度动态调整单轮输出预算，返回：
+    (effective_max_tokens, adaptive_rule_text)
+    """
+    text = (user_input or "").strip()
+    configured = int(configured_max_tokens) if configured_max_tokens is not None else MAX_TOKENS
+    configured = max(16, configured)
+
+    short_keywords = (
+        "在吗", "早", "早安", "晚安", "午安", "嗯", "哦", "ok", "hi", "hello",
+        "嗨", "哈喽", "好的", "收到", "哈哈", "好耶", "谢谢", "你呢", "咋样", "干嘛",
+        "我喜欢你", "喜欢你", "爱你",
+    )
+    long_keywords = (
+        "详细", "具体", "展开", "步骤", "分析", "原理", "解释", "为什么",
+        "怎么做", "怎么实现", "教程", "方案", "对比", "总结",
+    )
+
+    has_long_intent = any(k in text for k in long_keywords)
+    has_short_intent = any(k in text.lower() for k in short_keywords)
+    has_multi_clause = text.count("，") + text.count(",") + text.count("；") + text.count(";") >= 3
+    has_question = ("?" in text) or ("？" in text)
+    looks_like_short_social = (len(text) <= 24) and (not has_long_intent) and (not has_multi_clause) and (not has_question)
+
+    if has_long_intent or len(text) >= 90 or has_multi_clause:
+        preferred_tokens = 240
+        target = "60-120字（最多约150字）"
+    elif (len(text) <= 14 and has_short_intent) or looks_like_short_social:
+        preferred_tokens = 64
+        target = "15-30字（1-2句）"
+    else:
+        preferred_tokens = 128
+        target = "30-50字（2-3句）"
+
+    effective_tokens = min(configured, preferred_tokens)
+    rule = (
+        "【回复长度自适应】优先遵守本条（可覆盖人设中的固定字数）："
+        + ("本轮建议回复长度为%s。" % target)
+        + "回复应完整成句后自然结束，不要故意拉长。"
+        + "若用户只是寒暄/确认，尽量一句话；若用户明确要求详细解释，可在上限内适当展开。"
+    )
+    return effective_tokens, rule
+
 
 def resolve_effective_ollama_host(ollama_host_from_json=""):
     env = os.environ.get("OLLAMA_HOST", "").strip()
@@ -51,6 +103,60 @@ def resolve_effective_ollama_host(ollama_host_from_json=""):
 def emit_event(obj):
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def user_explicitly_requests_stage_directions(user_input):
+    text = (user_input or "").strip()
+    if not text:
+        return False
+    keys = (
+        "舞台说明", "动作描写", "括号", "剧本", "旁白", "台词格式", "演出", "表演",
+        "（", "）", "(", ")",
+    )
+    return any(k in text for k in keys)
+
+
+def strip_parenthesized_text_piece(piece, state):
+    """
+    流式增量去除括号舞台说明，支持跨 chunk：
+    - 中文全角： （...）
+    - 英文半角： (...)
+    """
+    if not piece:
+        return piece
+    ascii_depth = int(state.get("ascii_depth", 0))
+    cjk_depth = int(state.get("cjk_depth", 0))
+    out = []
+    for ch in piece:
+        if ch == "(":
+            ascii_depth += 1
+            continue
+        if ch == ")":
+            if ascii_depth > 0:
+                ascii_depth -= 1
+                continue
+            if cjk_depth > 0:
+                cjk_depth -= 1
+                continue
+            out.append(ch)
+            continue
+        if ch == "（":
+            cjk_depth += 1
+            continue
+        if ch == "）":
+            if cjk_depth > 0:
+                cjk_depth -= 1
+                continue
+            if ascii_depth > 0:
+                ascii_depth -= 1
+                continue
+            out.append(ch)
+            continue
+        if ascii_depth == 0 and cjk_depth == 0:
+            out.append(ch)
+    state["ascii_depth"] = ascii_depth
+    state["cjk_depth"] = cjk_depth
+    return "".join(out)
 
 
 def _history_chars(history_list):
@@ -85,7 +191,7 @@ def trim_history_by_est_tokens(history, max_est_tokens, chars_per_token):
 
 def build_messages(user_input, pet_state, history, conversation_summary="", structured_memory=None,
                    persona_prompt="", max_total_context_chars=0, max_history_est_tokens=0,
-                   chars_per_est_token=3, no_stage_directions=True):
+                   chars_per_est_token=3, no_stage_directions=True, adaptive_reply_rule=""):
     """history: list[{"role":"user"|"assistant","content":"..."}]，不含本轮 user_input。
     max_total_context_chars：system+全部 history 用户输入的总字符上限（硬性防守）。
     """
@@ -110,6 +216,7 @@ def build_messages(user_input, pet_state, history, conversation_summary="", stru
         )
     if sm_parts:
         parts.append("【结构化记忆】\n" + "\n".join(sm_parts))
+        parts.append(MEAL_RECOMMEND_GUARDRAIL)
     else:
         cs = (conversation_summary or "").strip()
         if cs:
@@ -117,6 +224,8 @@ def build_messages(user_input, pet_state, history, conversation_summary="", stru
     parts.append(APPEARANCE_WRITING_GUARDRAIL)
     if no_stage_directions:
         parts.append(OUTPUT_STYLE_GUARDRAIL)
+    if adaptive_reply_rule:
+        parts.append(adaptive_reply_rule)
     system_prompt = "\n\n".join(parts)
 
     hist = []
@@ -313,9 +422,12 @@ def summarize_structured_merge(existing_memory, dialogue_chunk, limits, model, h
         "1) preferences：只写主人侧的偏好与期望——例如主人希望的称呼、沟通风格、希望你怎么回应。"
         "不要把宠物自身的喜好、性格描写、宠物想用的名字写进此字段（例如「喜欢被摸头」「宠物更喜欢叫团团」属于宠物侧，禁止放入 preferences）。\n"
         "2) tasks：双方约定、主人托付的待办、未完成的约定事项。\n"
-        "3) avoid：主人明确表示反感的话题、禁词、不宜提及的内容（可对主人或对话双方都生效）。\n"
+        "3) avoid：主人明确表示反感的话题、禁词、不宜提及的内容（可对主人或对话双方都生效）。"
+        "若主人忌口某类食物（如香菜）或不宜某种饮品，也可写入此字段便于点餐场景检索。\n"
         "4) facts：客观要点——包括关于主人的事实（姓名、称呼、主人提过的重要信息）；"
         "以及需在多轮对话中保持一致的宠物设定要点、称呼争议等事实。"
+        "【重要】凡涉及长期健康与饮食的客观事实必须写入 facts（或必要时写入 avoid），合并时禁止丢弃："
+        "过敏史、药物过敏、乳糖不耐受、禁食或忌口、近期饮食计划（如要吃清淡、鸡胸肉）、慢性病相关医嘱式偏好。"
         "宠物当下的饿、累、心情等瞬时状态一般由程序传入的「宠物当前状态」描述，facts 里勿重复堆砌此类描写，除非对话明确要求长期记住。\n"
         "输出必须是合法 JSON 对象，仅包含键 preferences,tasks,avoid,facts，值为字符串。"
         "不要 markdown 围栏，不要解释。合并时优先保留仍有用的旧内容；新对话中有则用新信息补充或替换；不要编造。"
@@ -346,7 +458,8 @@ def summarize_structured_merge(existing_memory, dialogue_chunk, limits, model, h
     return existing_memory
 
 
-def stream_chat_once(messages, model, max_tokens, temperature, host_base, timeout_sec=180):
+def stream_chat_once(messages, model, max_tokens, temperature, host_base,
+                     timeout_sec=180, strip_stage_parentheses=False):
     url = host_base.rstrip("/") + "/api/chat"
     payload = json.dumps(
         {
@@ -366,6 +479,7 @@ def stream_chat_once(messages, model, max_tokens, temperature, host_base, timeou
         method="POST",
     )
     fp = urllib.request.urlopen(req, timeout=timeout_sec)
+    strip_state = {"ascii_depth": 0, "cjk_depth": 0}
     try:
         while True:
             raw = fp.readline()
@@ -385,6 +499,10 @@ def stream_chat_once(messages, model, max_tokens, temperature, host_base, timeou
             msg = data.get("message") or {}
             piece = msg.get("content") or ""
             if piece:
+                if strip_stage_parentheses:
+                    piece = strip_parenthesized_text_piece(piece, strip_state)
+                if not piece:
+                    continue
                 emit_event({"event": "delta", "content": piece})
             if data.get("done"):
                 break
@@ -470,7 +588,8 @@ def chat_once_collect_openai(messages, model, api_base, api_key,
 
 
 def stream_chat_once_openai(messages, model, api_base, api_key,
-                            max_tokens, temperature, timeout_sec=180):
+                            max_tokens, temperature, timeout_sec=180,
+                            strip_stage_parentheses=False):
     """流式 OpenAI-compatible /v1/chat/completions (stream)。"""
     url = resolve_openai_chat_completions_url(api_base)
     payload = json.dumps({
@@ -484,6 +603,7 @@ def stream_chat_once_openai(messages, model, api_base, api_key,
                                  headers=_openai_compat_headers(api_key),
                                  method="POST")
     fp = urllib.request.urlopen(req, timeout=timeout_sec)
+    strip_state = {"ascii_depth": 0, "cjk_depth": 0}
     try:
         while True:
             raw = fp.readline()
@@ -507,6 +627,10 @@ def stream_chat_once_openai(messages, model, api_base, api_key,
                 delta = choices[0].get("delta") or {}
                 piece = delta.get("content") or ""
                 if piece:
+                    if strip_stage_parentheses:
+                        piece = strip_parenthesized_text_piece(piece, strip_state)
+                    if not piece:
+                        continue
                     emit_event({"event": "delta", "content": piece})
     finally:
         fp.close()
@@ -531,15 +655,17 @@ def unified_chat_once_collect(messages, model, provider, host_base,
 
 def unified_stream_chat_once(messages, model, provider, host_base,
                              api_base, api_key, max_tokens, temperature,
-                             timeout_sec=180):
+                             timeout_sec=180, strip_stage_parentheses=False):
     """根据 provider 选择后端做流式调用。"""
     if provider == "openai_compatible":
         return stream_chat_once_openai(messages, model, api_base, api_key,
                                        max_tokens=max_tokens,
                                        temperature=temperature,
-                                       timeout_sec=timeout_sec)
+                                       timeout_sec=timeout_sec,
+                                       strip_stage_parentheses=strip_stage_parentheses)
     return stream_chat_once(messages, model, max_tokens, temperature,
-                            host_base, timeout_sec=timeout_sec)
+                            host_base, timeout_sec=timeout_sec,
+                            strip_stage_parentheses=strip_stage_parentheses)
 
 
 def log_http_error_response(code, reason, body):
@@ -553,7 +679,8 @@ def log_http_error_response(code, reason, body):
 
 
 def run_streaming_chat(messages, user_input, pet_state, model, max_tokens, temperature, host_base,
-                       provider="ollama", api_base="", api_key=""):
+                       provider="ollama", api_base="", api_key="",
+                       strip_stage_parentheses=False):
     last_error = ""
     max_attempts = 3
     hb = host_base.rstrip("/")
@@ -562,7 +689,8 @@ def run_streaming_chat(messages, user_input, pet_state, model, max_tokens, tempe
         should_retry = False
         try:
             unified_stream_chat_once(messages, model, provider, hb, api_base, api_key,
-                                     max_tokens, temperature)
+                                     max_tokens, temperature,
+                                     strip_stage_parentheses=strip_stage_parentheses)
             emit_event({"event": "done", "success": True})
             return
         except urllib.error.HTTPError as e:
@@ -777,6 +905,7 @@ def main():
         except (TypeError, ValueError):
             max_input_len = MAX_INPUT_LENGTH
     user_input = user_input[:max_input_len]
+    effective_max_tokens, adaptive_reply_rule = choose_adaptive_reply_budget(user_input, max_tokens)
 
     if json_read_error:
         emit_event(
@@ -793,6 +922,8 @@ def main():
 
     effective_host = resolve_effective_ollama_host(ollama_hint_from_request)
     api_key = resolve_effective_api_key(api_key_inline, api_key_env)
+    explicit_stage_requested = user_explicitly_requests_stage_directions(user_input)
+    strip_stage_parentheses = bool(reply_no_stage_directions) and (not explicit_stage_requested)
 
     if chat_mode == "summarize_structured":
         try:
@@ -827,10 +958,12 @@ def main():
         max_history_est_tokens=max_history_est_tokens_cfg,
         chars_per_est_token=chars_per_est_token_cfg,
         no_stage_directions=reply_no_stage_directions,
+        adaptive_reply_rule=adaptive_reply_rule,
     )
     run_streaming_chat(
-        messages, user_input, pet_state, model, max_tokens, temperature, effective_host,
-        provider, api_base, api_key
+        messages, user_input, pet_state, model, effective_max_tokens, temperature, effective_host,
+        provider, api_base, api_key,
+        strip_stage_parentheses=strip_stage_parentheses
     )
 
 

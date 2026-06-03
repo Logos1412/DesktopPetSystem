@@ -8,14 +8,16 @@
 #include "PetFSM.h"
 #include "PetAttribute.h"
 #include "PetConfig.h"
+#include "PetVirtualPath.h"
+#include "PetInferenceServices.h"
 
-/** 从 exe 目录逐级向上查找相对路径；若多处存在则取最外层（最后一次命中） */
-static QString findConfigFileUpward(const QString& relativePath)
+/** 从 exe 目录逐级向上查找工程根下的逻辑路径（pet:/… 或 resources/…）；若多处存在则取最外层（最后一次命中） */
+static QString findConfigFileUpward(const QString& logicalPathUnderProjectRoot)
 {
 	QString found;
 	QDir dir(QCoreApplication::applicationDirPath());
 	for (int depth = 0; depth < 12; ++depth) {
-		const QString candidate = dir.absoluteFilePath(relativePath);
+		const QString candidate = PetVirtualPath::resolveToAbsolute(logicalPathUnderProjectRoot, dir.absolutePath());
 		const QFileInfo fi(candidate);
 		if (fi.isFile()) {
 			found = fi.absoluteFilePath();
@@ -30,11 +32,11 @@ static QString findConfigFileUpward(const QString& relativePath)
 /** 返回可加载的 pet_config.json 绝对路径；若缺失则从 pet_config.defaults.json 复制生成 */
 static QString resolvePetConfigPathForStartup()
 {
-	const QString petCfg = findConfigFileUpward(QStringLiteral("resources/config/pet_config.json"));
+	const QString petCfg = findConfigFileUpward(PetVirtualPath::toVirtual(QStringLiteral("resources/config/pet_config.json")));
 	if (!petCfg.isEmpty()) {
 		return petCfg;
 	}
-	const QString defaults = findConfigFileUpward(QStringLiteral("resources/config/pet_config.defaults.json"));
+	const QString defaults = findConfigFileUpward(PetVirtualPath::toVirtual(QStringLiteral("resources/config/pet_config.defaults.json")));
 	if (defaults.isEmpty()) {
 		return {};
 	}
@@ -66,10 +68,15 @@ int main(int argc, char* argv[])
 	// 加载配置
 	PetConfig* config = PetConfig::getInstance();
 	if (configPath.isEmpty() || !config->loadConfig(configPath)) {
-		qCritical() << "[致命错误] 配置加载失败：需要 resources/config/pet_config.json，"
-		                "或至少存在 resources/config/pet_config.defaults.json 以自动生成前者。";
+		qCritical() << "[致命错误] 配置加载失败：需要 pet:/resources/config/pet_config.json，"
+		                "或至少存在 pet:/resources/config/pet_config.defaults.json 以自动生成前者。";
 		return -1;
 	}
+
+	ensureConfiguredInferenceServicesAtStartup();
+	QObject::connect(&a, &QCoreApplication::aboutToQuit, []() {
+		shutdownInferenceServicesOnApplicationQuit();
+	});
 
 	// 创建属性对象
 	PetAttribute* petAttr = new PetAttribute();

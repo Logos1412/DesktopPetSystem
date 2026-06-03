@@ -48,6 +48,8 @@ public:
     void showAtPetRect(const QRect& petGlobalRect);
     void toggleMenu(const QRect& petGlobalRect);
     void refreshFoodsFromConfig();
+    /** 隐藏已展开的二级子菜单（互动、系统） */
+    void hideSubMenu();
 
 signals:
     /** 用户选择将属性恢复为配置文件默认值（等同首次启动存档） */
@@ -56,6 +58,7 @@ signals:
     void exportSaveRequested();
     void importSaveRequested();
     void openSettingsRequested();
+    void applicationQuitRequested();
 
 private:
     void initMenuStyle();
@@ -63,7 +66,6 @@ private:
     void initConnections();
     void setupMenuStructure();
     void showSubMenu(const QString& menuName, const QPoint& pos);
-    void hideSubMenu();
     void toggleSubMenu(const QString& menuName);
 
 private slots:

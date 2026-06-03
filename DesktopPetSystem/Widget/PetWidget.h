@@ -27,6 +27,8 @@ public:
     void startFreeMove();
     // 停止自由移动
     void stopFreeMove();
+    /** 隐藏界面并停掉交互/动画，供退出前立即反馈 */
+    void prepareForApplicationExit();
     // 重置无操作计时器
     void resetIdleTimer();
 
@@ -74,8 +76,10 @@ private slots:
     void onMovieOneShotFinished();
     void onGifFrameChanged(int frameNumber);
     void onGifUpdatedForOneShot();
+    void onGifOneShotPollTick();
     void onFreeMoveUpdate();
     void onAutoSave();
+    void requestApplicationQuit();
 
 private:
     PetFSM* m_petFsm = nullptr;             // 状态机指针
@@ -85,7 +89,7 @@ private:
 
     ScaledGifWidget* m_gifLabel = nullptr;  // GIF：固定窗口内等比居中，避免切换素材时比例乱跳
     QMovie* m_gifMovie = nullptr;           // GIF动画对象
-    /** 当前 GIF 相对路径（resources/animations/），用于缩放热更新 */
+    /** 当前 GIF 相对路径（逻辑上位于 pet:/resources/animations/），用于缩放热更新 */
     QString m_currentAnimationRelPath;
 
     enum class MovieOneShotKind {
@@ -100,6 +104,9 @@ private:
 
     void applyGifPlayback(const QString& absolutePath, bool playOnce, MovieOneShotKind pendingKind);
     void disconnectGifOneShotHandlers();
+    /** frameFromSignalOrMinus1 >=0 用信号帧；否则轮询 currentFrameNumber()（部分 GIF 回绕不发 frameChanged） */
+    void advanceOneShotLoopDetectionFromFrame(int frameFromSignalOrMinus1);
+    void finishOneShotPlaybackFromLoopDetection();
     /** 桌面随机移动时按水平方向切换左/行走动画；停下时恢复站立待机 */
     void updateIdleFreeMoveAnimation();
     void restoreIdleStandingAnimation();
@@ -110,10 +117,14 @@ private:
     /** 单次 GIF（双击特殊 / 进食 / 入睡过渡）播放期间，阻止 switchStateAnimation 覆盖 */
     bool m_blockStateAnimationSwitch = false;
     MovieOneShotKind m_movieOneShotKind = MovieOneShotKind::None;
-    /** 多帧 GIF：已显示最后一帧，等待下一帧回到 0 视为播完一轮 */
+    /** 多帧 GIF 单次：上一帧序号，用于检测「最后一帧 -> 0」 */
+    int m_gifOneShotPrevFrame = -1;
+    /** 多帧 GIF：已到最后一帧（与上一帧组合，兜底解码顺序差异） */
     bool m_gifOneShotSawLastFrame = false;
     /** 单帧 GIF：首轮绘制后结束 */
     bool m_gifOneShotSingleFrameHandled = false;
+    /** 单次 GIF：轮询帧号，补 frameChanged 缺失 */
+    QTimer* m_gifOneShotPollTimer = nullptr;
 
     // 自由移动相关
     QTimer* m_idleTimer = nullptr;          // 无操作计时器

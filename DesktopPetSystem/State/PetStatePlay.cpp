@@ -52,6 +52,7 @@ void PetStatePlay::update()
 void PetStatePlay::exit()
 {
     qDebug() << "退出玩耍状态";
+    logExitSettlement(QStringLiteral("玩耍"));
     m_updateTimer->stop();
     disconnect(m_updateTimer, &QTimer::timeout, this, &PetStatePlay::update);
 }

@@ -31,6 +31,7 @@ private:
     QJsonObject getNestedObj(const QJsonObject& root, const QString& key);
 
     void applyChatRuntimeObject(const QJsonObject& chatRuntimeObj);
+    void applyTtsGptsovitsObject(const QJsonObject& ttsObj);
 
     static PetConfig* m_instance;   // 单例实例
 
@@ -92,10 +93,14 @@ private:
     QString m_chatApiBase;
     QString m_chatApiKey;
     QString m_chatApiKeyEnv;
-    QString m_chatModel = "llama3.1:8b";
-    QString m_chatScriptPath = "resources/scripts/chat_ai.py";
+    QString m_chatOllamaModel = QStringLiteral("llama3.1:8b");
+    QString m_chatCloudModel = QStringLiteral("deepseek-chat");
+    QString m_chatScriptPath = QStringLiteral("pet:/resources/scripts/chat_ai.py");
     QString m_pythonPath = "python3";
     QString m_chatOllamaHost = QStringLiteral("http://127.0.0.1:11434");
+    bool m_chatAutoStartOllama = true;
+    QString m_chatOllamaExecutable;
+    int m_chatOllamaStartupWaitMs = 60000;
     /** 对话系统提示中的「宠物人设」正文（chat_runtime.pet_persona）；为空则由脚本内置默认 */
     QString m_chatPetPersona;
     /* 聊天上下文与摘要（chat_runtime） */
@@ -115,7 +120,7 @@ private:
     int m_chatSummaryCompressAfterMemoryChars = 2800;
     /** system 中默认不要求括号舞台说明，减轻「尾巴」式幻觉 */
     bool m_chatReplyNoStageDirections = true;
-    QString m_chatMemoryPath = QStringLiteral("resources/save/chat_memory.json");
+    QString m_chatMemoryPath = QStringLiteral("pet:/resources/save/chat_memory.json");
     bool m_chatSummaryEnabled = true;
     int m_chatSummaryCompressAfterTurns = 12;
     int m_chatSummaryKeepRecentTurns = 8;
@@ -124,6 +129,28 @@ private:
     int m_memoryTasksMaxChars = 120;
     int m_memoryAvoidMaxChars = 80;
     int m_memoryFactsMaxChars = 120;
+
+    // GPT-SoVITS 语音播报（chat 回复完成后）
+    bool m_ttsGptsovitsEnabled = false;
+    QString m_ttsGptsovitsBaseUrl = QStringLiteral("http://127.0.0.1:9880");
+    QString m_ttsGptsovitsRefAudioPath = QStringLiteral("pet:/resources/audio/东雪莲.mp3");
+    QString m_ttsGptsovitsPromptText;
+    QString m_ttsGptsovitsTextLang = QStringLiteral("zh");
+    QString m_ttsGptsovitsPromptLang = QStringLiteral("zh");
+    int m_ttsGptsovitsMaxChars = 300;
+    bool m_ttsGptsovitsStripParentheses = true;
+    bool m_ttsDisplayTextAfterSynthesis = false;
+    QString m_ttsGptsovitsScriptPath = QStringLiteral("pet:/resources/scripts/tts_gptsovits.py");
+    bool m_ttsGptsovitsAutoStartApi = true;
+    /** GPT-SoVITS 安装根目录（含 api_v2.py）；可为绝对路径或相对工程根 */
+    QString m_ttsGptsovitsInstallDir;
+    /** 可选：相对 install_dir 的 Python，或绝对路径；空则用 install_dir/runtime/python.exe */
+    QString m_ttsGptsovitsApiPython;
+    QString m_ttsGptsovitsApiConfig = QStringLiteral("GPT_SoVITS/configs/tts_infer.yaml");
+    QString m_ttsGptsovitsBindHost = QStringLiteral("127.0.0.1");
+    /** 若填写 pet:/…/xxx.bat，优先用脚本启动（可覆盖 install_dir 逻辑） */
+    QString m_ttsGptsovitsApiStartScript;
+    int m_ttsGptsovitsStartupWaitMs = 90000;
 
     // 日志配置
     bool m_verboseStateLogs = false;
@@ -152,7 +179,7 @@ private:
 
     QString m_configFilePath;
 
-    /** resources/animations/ 下相对路径 → 显示缩放系数（约 0.05～4） */
+    /** 动画相对路径（pet:/resources/animations/ 下路径片段）→ 显示缩放系数（约 0.05～4） */
     QHash<QString, double> m_animationScales;
 
 public:
@@ -224,10 +251,16 @@ public:
     /** 直接写在配置中的 API Key（优先于 api_key_env）；勿提交到公开仓库 */
     QString getChatApiKey() const { return m_chatApiKey; }
     QString getChatApiKeyEnv() const { return m_chatApiKeyEnv; }
-    QString getChatModel() const { return m_chatModel; }
+    QString getChatOllamaModel() const { return m_chatOllamaModel; }
+    QString getChatCloudModel() const { return m_chatCloudModel; }
+    /** 按当前 provider 返回对应模型名 */
+    QString getChatModel() const;
     QString getChatScriptPath() const { return m_chatScriptPath; }
     QString getPythonPath() const { return m_pythonPath; }
     QString getChatOllamaHost() const { return m_chatOllamaHost; }
+    bool isChatAutoStartOllama() const { return m_chatAutoStartOllama; }
+    QString getChatOllamaExecutable() const { return m_chatOllamaExecutable; }
+    int getChatOllamaStartupWaitMs() const { return m_chatOllamaStartupWaitMs; }
     QString getChatPetPersona() const { return m_chatPetPersona; }
     int getChatContextTurns() const { return m_chatContextTurns; }
     int getChatMaxContextChars() const { return m_chatMaxContextChars; }
@@ -245,6 +278,24 @@ public:
     int getChatSummaryMaxChars() const { return m_chatSummaryMaxChars; }
     /** 结构化记忆各槽位最大字符数（写入 Python memory_limits） */
     QJsonObject getStructuredMemoryLimitsJson() const;
+
+    bool isTtsGptsovitsEnabled() const { return m_ttsGptsovitsEnabled; }
+    QString getTtsGptsovitsBaseUrl() const { return m_ttsGptsovitsBaseUrl; }
+    QString getTtsGptsovitsRefAudioPath() const { return m_ttsGptsovitsRefAudioPath; }
+    QString getTtsGptsovitsPromptText() const { return m_ttsGptsovitsPromptText; }
+    QString getTtsGptsovitsTextLang() const { return m_ttsGptsovitsTextLang; }
+    QString getTtsGptsovitsPromptLang() const { return m_ttsGptsovitsPromptLang; }
+    int getTtsGptsovitsMaxChars() const { return m_ttsGptsovitsMaxChars; }
+    bool isTtsGptsovitsStripParentheses() const { return m_ttsGptsovitsStripParentheses; }
+    bool isTtsDisplayTextAfterSynthesis() const { return m_ttsDisplayTextAfterSynthesis; }
+    QString getTtsGptsovitsScriptPath() const { return m_ttsGptsovitsScriptPath; }
+    bool isTtsGptsovitsAutoStartApi() const { return m_ttsGptsovitsAutoStartApi; }
+    QString getTtsGptsovitsInstallDir() const { return m_ttsGptsovitsInstallDir; }
+    QString getTtsGptsovitsApiPython() const { return m_ttsGptsovitsApiPython; }
+    QString getTtsGptsovitsApiConfig() const { return m_ttsGptsovitsApiConfig; }
+    QString getTtsGptsovitsBindHost() const { return m_ttsGptsovitsBindHost; }
+    QString getTtsGptsovitsApiStartScript() const { return m_ttsGptsovitsApiStartScript; }
+    int getTtsGptsovitsStartupWaitMs() const { return m_ttsGptsovitsStartupWaitMs; }
 
     // 获取日志配置
     bool isVerboseStateLogsEnabled() const { return m_verboseStateLogs; }

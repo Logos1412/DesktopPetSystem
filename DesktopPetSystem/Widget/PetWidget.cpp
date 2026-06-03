@@ -7,8 +7,10 @@
 #include "PetState.h"
 #include "PetConfig.h"
 #include "PetController.h"
+#include <QApplication>
 #include "ChatWidget.h"
 #include "PetDatabase.h"
+#include "PetVirtualPath.h"
 #include "../State/PetStateChat.h"
 
 #include <QMouseEvent>
@@ -23,6 +25,7 @@
 #include <QRandomGenerator>
 #include <QMessageBox>
 #include <QtMath>
+#include <cmath>
 #include <QStringList>
 #include <QCloseEvent>
 #include <QDateTime>
@@ -113,20 +116,12 @@ private:
     qreal m_contentScale = 1.0;
 };
 
-// 获取项目根目录
-QString getProjectRootPath() {
-    QString appDir = QCoreApplication::applicationDirPath();
-    QDir dir(appDir);
-    // 从 x64/Debug 回溯2级到项目根目录
-    dir.cdUp();
-    dir.cdUp();
-    return dir.absolutePath();
-}
-
 // 获取动画绝对路径
 QString getAnimationPath(const QString& relativePath) {
-    QDir dir(getProjectRootPath());
-    return dir.absoluteFilePath("resources/animations/" + relativePath);
+    const QString root = PetVirtualPath::findProjectRootFromExe();
+    return PetVirtualPath::resolveToAbsolute(
+        PetVirtualPath::toVirtual(QStringLiteral("resources/animations/") + relativePath),
+        root);
 }
 
 static QString animationRelPathFromAbsolute(const QString& absolutePath)
@@ -147,6 +142,10 @@ PetWidget::PetWidget(PetFSM* fsm, PetAttribute* attr, QWidget* parent)
     initGifPlayer();
     initFreeMove();
 
+    m_gifOneShotPollTimer = new QTimer(this);
+    m_gifOneShotPollTimer->setInterval(32);
+    connect(m_gifOneShotPollTimer, &QTimer::timeout, this, &PetWidget::onGifOneShotPollTick);
+
     // 创建业务控制器和菜单
     m_controller = new PetController(fsm, attr);
     m_petMenu = new PetMenuWidget(fsm, attr, m_controller, this);
@@ -155,6 +154,7 @@ PetWidget::PetWidget(PetFSM* fsm, PetAttribute* attr, QWidget* parent)
     connect(m_petMenu, &PetMenuWidget::exportSaveRequested, this, &PetWidget::onExportSave);
     connect(m_petMenu, &PetMenuWidget::importSaveRequested, this, &PetWidget::onImportSave);
     connect(m_petMenu, &PetMenuWidget::openSettingsRequested, this, &PetWidget::onOpenSettings);
+    connect(m_petMenu, &PetMenuWidget::applicationQuitRequested, this, &PetWidget::requestApplicationQuit);
 
     connect(PetConfig::getInstance(), &PetConfig::configReloaded, this, &PetWidget::applyConfigHotReload);
 
@@ -180,8 +180,11 @@ PetWidget::PetWidget(PetFSM* fsm, PetAttribute* attr, QWidget* parent)
     resetIdleTimer();
 
     // 初始化存档系统
-    m_savePath = getProjectRootPath() + "/resources/save/save_data.json";
-    m_dbPath = getProjectRootPath() + "/resources/save/pet.db";
+    const QString root = PetVirtualPath::findProjectRootFromExe();
+    m_savePath = PetVirtualPath::resolveToAbsolute(
+        PetVirtualPath::toVirtual(QStringLiteral("resources/save/save_data.json")), root);
+    m_dbPath = PetVirtualPath::resolveToAbsolute(
+        PetVirtualPath::toVirtual(QStringLiteral("resources/save/pet.db")), root);
 
     // 初始化数据库
     m_database = new PetDatabase(this);
@@ -195,8 +198,9 @@ PetWidget::PetWidget(PetFSM* fsm, PetAttribute* attr, QWidget* parent)
     connect(m_autoSaveTimer, &QTimer::timeout, this, &PetWidget::onAutoSave);
     m_autoSaveTimer->start(5 * 60 * 1000);
 
-    /* 菜单「退出」走 qApp->quit() 时未必触发 closeEvent，此处保证写出 DB + JSON */
+    /* 其它路径触发 quit 时兜底：先藏宠再存档 */
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() {
+        prepareForApplicationExit();
         persistToDatabase();
         flushPortableJson();
     });
@@ -252,6 +256,8 @@ void PetWidget::initGifPlayer()
         return;
     }
 
+    m_gifMovie->setCacheMode(QMovie::CacheAll);
+
     m_gifLabel->setMovie(m_gifMovie); // ScaledGifWidget：接管绘制，不用 QLabel::setMovie
     applyGifPlayback(gifPath, false, MovieOneShotKind::None);
 
@@ -260,6 +266,8 @@ void PetWidget::initGifPlayer()
 
 void PetWidget::disconnectGifOneShotHandlers()
 {
+    if (m_gifOneShotPollTimer && m_gifOneShotPollTimer->isActive())
+        m_gifOneShotPollTimer->stop();
     if (!m_gifMovie) return;
     disconnect(m_gifMovie, &QMovie::frameChanged, this, &PetWidget::onGifFrameChanged);
     disconnect(m_gifMovie, &QMovie::updated, this, &PetWidget::onGifUpdatedForOneShot);
@@ -273,18 +281,24 @@ void PetWidget::applyGifPlayback(const QString& absolutePath, bool playOnce, Mov
 
     m_gifMovie->stop();
     m_gifMovie->setFileName(absolutePath);
+    m_gifMovie->setCacheMode(QMovie::CacheAll);
 
     if (playOnce) {
         m_movieOneShotKind = pendingKind;
+        m_gifOneShotPrevFrame = -1;
         m_gifOneShotSawLastFrame = false;
         m_gifOneShotSingleFrameHandled = false;
         connect(m_gifMovie, &QMovie::frameChanged, this, &PetWidget::onGifFrameChanged);
         connect(m_gifMovie, &QMovie::updated, this, &PetWidget::onGifUpdatedForOneShot);
+        connect(m_gifMovie, &QMovie::finished, this, &PetWidget::onMovieOneShotFinished);
     } else {
         m_movieOneShotKind = MovieOneShotKind::None;
     }
 
     m_gifMovie->start();
+
+    if (playOnce && m_gifOneShotPollTimer)
+        m_gifOneShotPollTimer->start();
 
     m_currentAnimationRelPath = animationRelPathFromAbsolute(absolutePath);
     if (m_gifLabel) {
@@ -294,6 +308,16 @@ void PetWidget::applyGifPlayback(const QString& absolutePath, bool playOnce, Mov
 
 void PetWidget::onGifFrameChanged(int frameNumber)
 {
+    advanceOneShotLoopDetectionFromFrame(frameNumber);
+}
+
+void PetWidget::onGifOneShotPollTick()
+{
+    advanceOneShotLoopDetectionFromFrame(-1);
+}
+
+void PetWidget::advanceOneShotLoopDetectionFromFrame(int frameFromSignalOrMinus1)
+{
     if (m_movieOneShotKind == MovieOneShotKind::None || !m_gifMovie)
         return;
 
@@ -301,13 +325,31 @@ void PetWidget::onGifFrameChanged(int frameNumber)
     if (fc <= 1)
         return;
 
-    if (frameNumber == fc - 1) {
-        m_gifOneShotSawLastFrame = true;
-    } else if (frameNumber == 0 && m_gifOneShotSawLastFrame) {
-        disconnectGifOneShotHandlers();
-        m_gifMovie->stop();
-        onMovieOneShotFinished();
+    const int cur = frameFromSignalOrMinus1 >= 0 ? frameFromSignalOrMinus1 : m_gifMovie->currentFrameNumber();
+    const int prev = m_gifOneShotPrevFrame;
+
+    if (prev == fc - 1 && cur == 0) {
+        finishOneShotPlaybackFromLoopDetection();
+        return;
     }
+    if (cur == fc - 1) {
+        m_gifOneShotSawLastFrame = true;
+    } else if (cur == 0 && m_gifOneShotSawLastFrame) {
+        finishOneShotPlaybackFromLoopDetection();
+        return;
+    }
+    m_gifOneShotPrevFrame = cur;
+}
+
+void PetWidget::finishOneShotPlaybackFromLoopDetection()
+{
+    if (m_movieOneShotKind == MovieOneShotKind::None || !m_gifMovie)
+        return;
+    disconnectGifOneShotHandlers();
+    m_gifMovie->stop();
+    m_gifOneShotPrevFrame = -1;
+    m_gifOneShotSawLastFrame = false;
+    onMovieOneShotFinished();
 }
 
 void PetWidget::onGifUpdatedForOneShot()
@@ -327,9 +369,11 @@ void PetWidget::onGifUpdatedForOneShot()
 void PetWidget::onMovieOneShotFinished()
 {
     if (!m_gifMovie) return;
-    disconnectGifOneShotHandlers();
-
     const MovieOneShotKind k = m_movieOneShotKind;
+    if (k == MovieOneShotKind::None)
+        return;
+
+    disconnectGifOneShotHandlers();
     m_movieOneShotKind = MovieOneShotKind::None;
     m_blockStateAnimationSwitch = false;
 
@@ -398,6 +442,42 @@ void PetWidget::stopFreeMove()
     qDebug() << "[自由移动] 停止自由移动";
 }
 
+void PetWidget::prepareForApplicationExit()
+{
+    if (m_autoSaveTimer) {
+        m_autoSaveTimer->stop();
+    }
+    if (m_idleTimer) {
+        m_idleTimer->stop();
+    }
+    stopFreeMove();
+
+    if (m_petFsm && m_petFsm->currentState() == PetStateType::Chat) {
+        m_petFsm->changeState(PetStateType::Idle);
+    }
+
+    if (m_petMenu) {
+        m_petMenu->hide();
+        m_petMenu->hideSubMenu();
+    }
+    if (m_chatWidget) {
+        m_chatWidget->hide();
+    }
+
+    setEnabled(false);
+    hide();
+    QApplication::processEvents();
+}
+
+void PetWidget::requestApplicationQuit()
+{
+    prepareForApplicationExit();
+    persistToDatabase();
+    flushPortableJson();
+    QApplication::processEvents();
+    qApp->quit();
+}
+
 void PetWidget::restoreIdleStandingAnimation()
 {
     if (!m_gifMovie || m_blockStateAnimationSwitch)
@@ -421,17 +501,20 @@ void PetWidget::updateIdleFreeMoveAnimation()
 
     const qreal c = qCos(m_moveAngle);
     /* 移动过程中只播左/右走，不切 Idle，避免「行走↔待机」抖动；
-       左右切换用较大滞回阈值，中间方向维持上一帧朝向。 */
+       左右切换用滞回阈值；|cos| 很小时视为近似竖直移动，不切换左右 GIF，避免贴墙来回反弹时动画狂闪。 */
     constexpr qreal kFlipSide = 0.30;
+    constexpr qreal kHorizontalDeadZone = 0.26;
 
     if (m_idleWalkAnimSlot == IdleWalkAnimSlot::Stand) {
         m_idleWalkAnimSlot = (c >= 0) ? IdleWalkAnimSlot::WalkRight : IdleWalkAnimSlot::WalkLeft;
-    } else if (m_idleWalkAnimSlot == IdleWalkAnimSlot::WalkLeft) {
-        if (c > kFlipSide)
-            m_idleWalkAnimSlot = IdleWalkAnimSlot::WalkRight;
-    } else {
-        if (c < -kFlipSide)
-            m_idleWalkAnimSlot = IdleWalkAnimSlot::WalkLeft;
+    } else if (qAbs(c) >= kHorizontalDeadZone) {
+        if (m_idleWalkAnimSlot == IdleWalkAnimSlot::WalkLeft) {
+            if (c > kFlipSide)
+                m_idleWalkAnimSlot = IdleWalkAnimSlot::WalkRight;
+        } else {
+            if (c < -kFlipSide)
+                m_idleWalkAnimSlot = IdleWalkAnimSlot::WalkLeft;
+        }
     }
 
     const QString rel = (m_idleWalkAnimSlot == IdleWalkAnimSlot::WalkLeft)
@@ -479,61 +562,58 @@ void PetWidget::onFreeMoveUpdate()
         return;
     }
 
-    // 获取配置
     PetConfig* config = PetConfig::getInstance();
-    qreal speed = config->getMoveSpeed();
-    int keepRate = config->getDirectionKeepRate();
+    const qreal speed = config->getMoveSpeed();
+    const int keepRate = config->getDirectionKeepRate();
 
-    // 获取屏幕边界
     QScreen* screen = QApplication::primaryScreen();
-    QRect screenRect = screen->availableGeometry();
+    const QRect ar = screen->availableGeometry();
+    const int minX = ar.left();
+    const int minY = ar.top();
+    const int maxX = ar.right() - this->width() + 1;
+    const int maxY = ar.bottom() - this->height() + 1;
+    if (maxX < minX || maxY < minY) {
+        return;
+    }
 
-    // 获取当前位置
     QPoint currentPos = this->pos();
-    int newX = currentPos.x();
-    int newY = currentPos.y();
+    qreal vx = speed * qCos(m_moveAngle);
+    qreal vy = speed * qSin(m_moveAngle);
 
-    // 计算移动
-    qreal dx = speed * qCos(m_moveAngle);
-    qreal dy = speed * qSin(m_moveAngle);
+    int newX = currentPos.x() + qRound(vx);
+    int newY = currentPos.y() + qRound(vy);
 
-    newX += static_cast<int>(dx);
-    newY += static_cast<int>(dy);
-
-    // 边界检测和方向调整
     bool hitBoundary = false;
 
-    // 左边界
-    if (newX <= 0) {
-        newX = 0;
+    /* 用速度分量反弹再 atan2 回角度：角落同时碰两边时等价于 vx、vy 一起翻转，
+       避免「先水平反射再竖直反射」在角度域里产生的不稳定序列导致贴边来回抽搐。 */
+    if (newX < minX) {
+        newX = minX;
+        vx = -vx;
         hitBoundary = true;
-        m_moveAngle = M_PI - m_moveAngle;
         m_moveDirectionBias = 1;
-    }
-    // 右边界
-    else if (newX >= screenRect.width() - this->width()) {
-        newX = screenRect.width() - this->width();
+    } else if (newX > maxX) {
+        newX = maxX;
+        vx = -vx;
         hitBoundary = true;
-        m_moveAngle = M_PI - m_moveAngle;
         m_moveDirectionBias = -1;
     }
 
-    // 上边界
-    if (newY <= 0) {
-        newY = 0;
+    if (newY < minY) {
+        newY = minY;
+        vy = -vy;
         hitBoundary = true;
-        m_moveAngle = -m_moveAngle;
-    }
-    // 下边界
-    else if (newY >= screenRect.height() - this->height()) {
-        newY = screenRect.height() - this->height();
+    } else if (newY > maxY) {
+        newY = maxY;
+        vy = -vy;
         hitBoundary = true;
-        m_moveAngle = -m_moveAngle;
     }
 
-    // 规范化角度到 [0, 2π)
-    while (m_moveAngle < 0) m_moveAngle += 2 * M_PI;
-    while (m_moveAngle >= 2 * M_PI) m_moveAngle -= 2 * M_PI;
+    m_moveAngle = static_cast<qreal>(std::atan2(static_cast<double>(vy), static_cast<double>(vx)));
+    while (m_moveAngle < 0)
+        m_moveAngle += 2 * M_PI;
+    while (m_moveAngle >= 2 * M_PI)
+        m_moveAngle -= 2 * M_PI;
 
     // 随机微调方向（降低突然反向的概率）
     if (!hitBoundary) {
@@ -583,9 +663,12 @@ void PetWidget::mousePressEvent(QMouseEvent* event)
         // 左键按下：开始拖拽
         m_isDragging = true;
         m_dragStartPos = event->pos();
-        // 隐藏菜单
-        if (m_petMenu && m_petMenu->isVisible()) {
-            m_petMenu->hide();
+        // 隐藏主菜单和子菜单
+        if (m_petMenu) {
+            m_petMenu->hideSubMenu();
+            if (m_petMenu->isVisible()) {
+                m_petMenu->hide();
+            }
         }
     }
     else if (event->button() == Qt::RightButton) {
@@ -735,8 +818,15 @@ void PetWidget::switchStateAnimation(PetStateType state)
 {
     if (!m_gifMovie) return;
 
-    if (m_blockStateAnimationSwitch) {
-        return;
+    /* 入睡（及聊天）的 GIF 由状态类 enter() 先 requestPlayAnimation，再由本槽收到 stateChanged。
+       此时 m_blockStateAnimationSwitch 刚被置为 true，若在此无条件「取消单次」会拆掉入睡过渡的监听，
+       入睡 GIF 会无限循环且永远收不到 notifySleepFallAsleepFinished。仅当目标状态会由本函数
+       自行切换素材时才取消上一段单次动画。 */
+    if (m_blockStateAnimationSwitch && state != PetStateType::Sleep && state != PetStateType::Chat) {
+        // 单次动画（进食、入睡、双击等）播放期间发生了状态切换：取消，让新状态接管画面。
+        m_blockStateAnimationSwitch = false;
+        m_movieOneShotKind = MovieOneShotKind::None;
+        disconnectGifOneShotHandlers();
     }
 
     // 非正常待机状态时停止自由移动
@@ -985,6 +1075,14 @@ void PetWidget::onOpenSettings()
     connect(&dlg, &SettingsDialog::chatMemoryEdited, this, [this]() {
         if (PetStateChat* cs = dynamic_cast<PetStateChat*>(m_petFsm->stateObject(PetStateType::Chat))) {
             cs->reloadChatMemoryFromDisk();
+        }
+    });
+    connect(&dlg, &SettingsDialog::chatMessagesCleared, this, [this]() {
+        if (PetStateChat* cs = dynamic_cast<PetStateChat*>(m_petFsm->stateObject(PetStateType::Chat))) {
+            cs->reloadChatMemoryFromDisk();
+        }
+        if (m_chatWidget) {
+            m_chatWidget->resetConversationView();
         }
     });
     dlg.exec();

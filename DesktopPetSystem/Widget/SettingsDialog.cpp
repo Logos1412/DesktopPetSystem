@@ -2,6 +2,8 @@
 
 #include "SettingsDialog.h"
 #include "PetConfig.h"
+#include "PetVirtualPath.h"
+#include "Core/PetInferenceServices.h"
 
 #include <QSplitter>
 #include <QListWidget>
@@ -36,30 +38,11 @@
 
 namespace {
 
-static QString projectRootFromPetConfigPath(const QString& petConfigPath)
-{
-    if (petConfigPath.isEmpty()) {
-        return {};
-    }
-    QDir d(QFileInfo(petConfigPath).absolutePath());
-    if (!d.cdUp()) {
-        return {};
-    }
-    if (!d.cdUp()) {
-        return {};
-    }
-    return d.absolutePath();
-}
-
 static QString chatMemoryAbsolutePathForForm()
 {
     PetConfig* cfg = PetConfig::getInstance();
-    const QString petCfg = cfg->getConfigFilePath();
-    const QString root = projectRootFromPetConfigPath(petCfg);
-    if (root.isEmpty()) {
-        return {};
-    }
-    return QDir(root).absoluteFilePath(cfg->getChatMemoryPath());
+    const QString root = PetVirtualPath::findProjectRootFromExe();
+    return PetVirtualPath::resolveToAbsolute(cfg->getChatMemoryPath(), root);
 }
 
 struct AnimScaleUiRow {
@@ -146,10 +129,14 @@ struct FormWidgets {
     QLineEdit* cr_api_base = nullptr;
     QLineEdit* cr_api_key = nullptr;
     QLineEdit* cr_api_key_env = nullptr;
-    QLineEdit* cr_model = nullptr;
+    QLineEdit* cr_ollama_model = nullptr;
+    QLineEdit* cr_cloud_model = nullptr;
     QLineEdit* cr_script_path = nullptr;
     QLineEdit* cr_python_path = nullptr;
     QLineEdit* cr_ollama_host = nullptr;
+    QCheckBox* cr_auto_start_ollama = nullptr;
+    QLineEdit* cr_ollama_executable = nullptr;
+    QSpinBox* cr_ollama_startup_wait_ms = nullptr;
     QSpinBox* cr_context_turns = nullptr;
     QSpinBox* cr_max_context_chars = nullptr;
     QSpinBox* cr_max_reply_tokens = nullptr;
@@ -172,6 +159,24 @@ struct FormWidgets {
 
     QComboBox* cr_chat_preset = nullptr;
     QPushButton* cr_chat_preset_apply = nullptr;
+
+    QCheckBox* tts_enabled = nullptr;
+    QCheckBox* tts_auto_start_api = nullptr;
+    QLineEdit* tts_base_url = nullptr;
+    QLineEdit* tts_install_dir = nullptr;
+    QLineEdit* tts_api_python = nullptr;
+    QLineEdit* tts_bind_host = nullptr;
+    QLineEdit* tts_api_config = nullptr;
+    QLineEdit* tts_api_start_script = nullptr;
+    QSpinBox* tts_startup_wait_ms = nullptr;
+    QLineEdit* tts_ref_audio_path = nullptr;
+    QPlainTextEdit* tts_prompt_text = nullptr;
+    QLineEdit* tts_text_lang = nullptr;
+    QLineEdit* tts_prompt_lang = nullptr;
+    QSpinBox* tts_max_chars = nullptr;
+    QCheckBox* tts_strip_parentheses = nullptr;
+    QCheckBox* tts_display_text_after_synthesis = nullptr;
+    QLineEdit* tts_script_path = nullptr;
 
     QCheckBox* log_verbose = nullptr;
 
@@ -288,6 +293,53 @@ static bool saveChatMemoryFromForm(FormWidgets* F)
     root.insert(QStringLiteral("memory"), mem);
     root.insert(QStringLiteral("version"), 2);
     root.insert(QStringLiteral("summary"), QString());
+
+    const QFileInfo fi(path);
+    QDir().mkpath(fi.absolutePath());
+
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    out.close();
+    return true;
+}
+
+/** 仅清空 chat_memory.json 中的 messages，保留 memory 四槽与其它键（来自磁盘当前内容）。 */
+static bool clearChatMessagesOnDisk()
+{
+    const QString path = chatMemoryAbsolutePathForForm();
+    if (path.isEmpty()) {
+        return false;
+    }
+
+    QJsonObject root;
+    if (QFile::exists(path)) {
+        QFile inf(path);
+        if (!inf.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        QJsonParseError e;
+        const QJsonDocument d = QJsonDocument::fromJson(inf.readAll(), &e);
+        inf.close();
+        if (e.error != QJsonParseError::NoError || !d.isObject()) {
+            return false;
+        }
+        root = d.object();
+    } else {
+        root.insert(QStringLiteral("version"), 2);
+        root.insert(QStringLiteral("summary"), QString());
+        QJsonObject mem;
+        mem.insert(QStringLiteral("preferences"), QString());
+        mem.insert(QStringLiteral("tasks"), QString());
+        mem.insert(QStringLiteral("avoid"), QString());
+        mem.insert(QStringLiteral("facts"), QString());
+        root.insert(QStringLiteral("memory"), mem);
+    }
+
+    root.insert(QStringLiteral("messages"), QJsonArray());
+    root.insert(QStringLiteral("version"), 2);
 
     const QFileInfo fi(path);
     QDir().mkpath(fi.absolutePath());
@@ -564,7 +616,14 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({132, 480});
 
-    connect(m_categoryList, &QListWidget::currentRowChanged, m_pageStack, &QStackedWidget::setCurrentIndex);
+    connect(m_categoryList, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (row < 0) return;
+        auto* item = m_categoryList->item(row);
+        if (!item || !(item->flags() & Qt::ItemIsSelectable)) return;
+        const int pageIdx = item->data(Qt::UserRole).toInt();
+        if (pageIdx >= 0 && pageIdx < m_pageStack->count())
+            m_pageStack->setCurrentIndex(pageIdx);
+    });
 
     rootLayout->addWidget(splitter, 1);
 
@@ -595,10 +654,25 @@ void SettingsDialog::buildTabs()
 {
     auto* F = new FormWidgets();
 
-    auto addPage = [this](const QString& title, QWidget* w) {
-        m_categoryList->addItem(title);
-        m_pageStack->addWidget(w);
+    auto addSection = [this](const QString& title) {
+        auto* item = new QListWidgetItem(title, m_categoryList);
+        item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
+        QFont f = item->font();
+        f.setBold(true);
+        item->setFont(f);
+        item->setData(Qt::UserRole, -1);
     };
+
+    int pageCount = 0;
+    auto addPage = [this, &pageCount](const QString& title, QWidget* w) {
+        auto* item = new QListWidgetItem(QStringLiteral("  ") + title, m_categoryList);
+        item->setData(Qt::UserRole, pageCount);
+        m_pageStack->addWidget(w);
+        ++pageCount;
+    };
+
+    // ======================== 属性系统 ========================
+    addSection(QStringLiteral("属性系统"));
 
     /* ---------- 属性与待机 ---------- */
     {
@@ -649,6 +723,47 @@ void SettingsDialog::buildTabs()
         form->addRow(QStringLiteral("脱离异常恢复阈值"), F->t_recovery);
         addPage(QStringLiteral("阈值"), page);
     }
+
+    /* ---------- 属性上下限 ---------- */
+    {
+        auto* page = new QWidget(this);
+        auto* form = new QFormLayout(page);
+        F->l_max = spinInt(page, 1, 999999);
+        form->addRow(QStringLiteral("属性上限"), F->l_max);
+        F->l_min = spinInt(page, -999999, 999999);
+        form->addRow(QStringLiteral("属性下限"), F->l_min);
+        addPage(QStringLiteral("属性上下限"), page);
+    }
+
+    /* ---------- 成长 ---------- */
+    {
+        auto* page = new QWidget(this);
+        auto* form = new QFormLayout(page);
+        F->g_exp_base = spinInt(page, 1, 999999);
+        form->addRow(QStringLiteral("升级所需基础经验"), F->g_exp_base);
+        F->g_exp_growth = spinInt(page, 0, 99999);
+        form->addRow(QStringLiteral("每级额外经验增量"), F->g_exp_growth);
+        addPage(QStringLiteral("成长"), page);
+    }
+
+    /* ---------- 食物 ---------- */
+    {
+        auto* scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        F->foodPage = new QWidget(this);
+        scroll->setWidget(F->foodPage);
+        F->foodOuterLayout = new QVBoxLayout(F->foodPage);
+        F->foodOuterLayout->addWidget(makeSectionHint(F->foodPage, QStringLiteral("每种食物对应配置文件中的一个条目；保存后会写入磁盘。")));
+        auto* foodListHost = new QWidget(F->foodPage);
+        F->foodListLayout = new QVBoxLayout(foodListHost);
+        F->foodListLayout->setContentsMargins(0, 0, 0, 0);
+        F->foodOuterLayout->addWidget(foodListHost);
+        F->foodOuterLayout->addStretch();
+        addPage(QStringLiteral("食物"), scroll);
+    }
+
+    // ======================== 状态行为 ========================
+    addSection(QStringLiteral("状态行为"));
 
     /* ---------- 睡眠 ---------- */
     {
@@ -729,18 +844,10 @@ void SettingsDialog::buildTabs()
         addPage(QStringLiteral("对话结算"), page);
     }
 
-    /* ---------- 成长 ---------- */
-    {
-        auto* page = new QWidget(this);
-        auto* form = new QFormLayout(page);
-        F->g_exp_base = spinInt(page, 1, 999999);
-        form->addRow(QStringLiteral("升级所需基础经验"), F->g_exp_base);
-        F->g_exp_growth = spinInt(page, 0, 99999);
-        form->addRow(QStringLiteral("每级额外经验增量"), F->g_exp_growth);
-        addPage(QStringLiteral("成长"), page);
-    }
+    // ======================== AI 对话 ========================
+    addSection(QStringLiteral("AI 对话"));
 
-    /* ---------- 聊天服务 ---------- */
+    /* ---------- 推理服务 ---------- */
     {
         auto* scroll = new QScrollArea(this);
         scroll->setWidgetResizable(true);
@@ -748,24 +855,8 @@ void SettingsDialog::buildTabs()
         scroll->setWidget(page);
         auto* lay = new QVBoxLayout(page);
         lay->addWidget(makeSectionHint(page, QStringLiteral("对接本地 Ollama 或兼容 OpenAI 的 HTTP API；修改后下次对话生效。"
+                                                             " 本机与云端模型分别保存，切换提供方时无需再改模型名。"
                                                              " 云端地址可直接粘贴厂商给的 Base URL（含 https://…/v1）。")));
-
-        lay->addWidget(makeSectionHint(page, QStringLiteral(
-            "不清楚「上下文轮数、摘要」等如何填写时：先在下拉里选档位，再点「应用预设到表单」。"
-            "只会填入与上下文/摘要相关的数字，不会改动提供方、模型名与 API Key。"
-            "预设说明：初级≈本机 Llama 3.1 8B；中级≈ Qwen2.5-32B-Instruct；高级≈ DeepSeek V4-Flash。")));
-
-        auto* presetBar = new QWidget(page);
-        auto* presetLay = new QHBoxLayout(presetBar);
-        presetLay->setContentsMargins(0, 0, 0, 0);
-        F->cr_chat_preset = new QComboBox(page);
-        populateChatRuntimePresetCombo(F->cr_chat_preset, m_configPath);
-        F->cr_chat_preset_apply = new QPushButton(QStringLiteral("应用预设到表单"), page);
-        F->cr_chat_preset_apply->setToolTip(QStringLiteral(
-            "把所选档位的建议值写入下方对应输入框；仍需点「保存并应用」才会写入配置文件。"));
-        presetLay->addWidget(F->cr_chat_preset, 1);
-        presetLay->addWidget(F->cr_chat_preset_apply);
-        lay->addWidget(presetBar);
 
         auto* form = new QFormLayout();
         lay->addLayout(form);
@@ -787,8 +878,13 @@ void SettingsDialog::buildTabs()
         F->cr_api_key_env->setPlaceholderText(QStringLiteral("可选；未填 Key 时从该环境变量读取"));
         form->addRow(QStringLiteral("API Key 环境变量名"), F->cr_api_key_env);
 
-        F->cr_model = new QLineEdit(page);
-        form->addRow(QStringLiteral("模型名"), F->cr_model);
+        F->cr_ollama_model = new QLineEdit(page);
+        F->cr_ollama_model->setPlaceholderText(QStringLiteral("如 llama3.1:8b"));
+        form->addRow(QStringLiteral("本机模型 (Ollama)"), F->cr_ollama_model);
+
+        F->cr_cloud_model = new QLineEdit(page);
+        F->cr_cloud_model->setPlaceholderText(QStringLiteral("如 deepseek-chat"));
+        form->addRow(QStringLiteral("云端模型"), F->cr_cloud_model);
 
         F->cr_script_path = new QLineEdit(page);
         form->addRow(QStringLiteral("对话脚本路径"), F->cr_script_path);
@@ -798,6 +894,136 @@ void SettingsDialog::buildTabs()
 
         F->cr_ollama_host = new QLineEdit(page);
         form->addRow(QStringLiteral("Ollama 地址"), F->cr_ollama_host);
+
+        F->cr_auto_start_ollama = new QCheckBox(QStringLiteral("桌宠启动时自动拉起 Ollama（ollama serve）"), page);
+        form->addRow(QStringLiteral(""), F->cr_auto_start_ollama);
+
+        F->cr_ollama_executable = new QLineEdit(page);
+        F->cr_ollama_executable->setPlaceholderText(
+            QStringLiteral("留空则尝试 %LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe 或 PATH 中的 ollama"));
+        form->addRow(QStringLiteral("Ollama 可执行文件"), F->cr_ollama_executable);
+
+        F->cr_ollama_startup_wait_ms = spinInt(page, 3000, 300000);
+        form->addRow(QStringLiteral("等待 Ollama 就绪(ms)"), F->cr_ollama_startup_wait_ms);
+
+        F->cr_no_stage_directions = new QCheckBox(QStringLiteral("默认不使用括号舞台/动作描写"), page);
+        form->addRow(QStringLiteral(""), F->cr_no_stage_directions);
+
+        F->cr_pet_persona = new QPlainTextEdit(page);
+        F->cr_pet_persona->setMinimumHeight(140);
+        F->cr_pet_persona->setPlaceholderText(
+            QStringLiteral("留空则使用脚本内置默认人设（与原版相同）。可在此自定义宠物性格与回复规则。"));
+        form->addRow(QStringLiteral("宠物人设"), F->cr_pet_persona);
+
+        F->cr_memory_path = new QLineEdit(page);
+        form->addRow(QStringLiteral("记忆文件路径"), F->cr_memory_path);
+
+        addPage(QStringLiteral("推理服务"), scroll);
+    }
+
+    /* ---------- 语音播报（GPT-SoVITS） ---------- */
+    {
+        auto* scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        auto* page = new QWidget(this);
+        scroll->setWidget(page);
+        auto* lay = new QVBoxLayout(page);
+        lay->addWidget(makeSectionHint(page, QStringLiteral(
+            "回复文字结束后调用本地 GPT-SoVITS 合成语音。须使用 api_v2 服务（默认 9880），"
+            "不是 WebUI 网页端口。安装目录需含 api_v2.py；Python 留空则使用 install_dir/runtime/python.exe。"
+            "修改后保存；若已开启「启动时自动拉起 API」，需重启桌宠后生效。")));
+
+        auto* form = new QFormLayout();
+        lay->addLayout(form);
+
+        F->tts_enabled = new QCheckBox(QStringLiteral("启用语音播报"), page);
+        form->addRow(QStringLiteral(""), F->tts_enabled);
+
+        F->tts_auto_start_api = new QCheckBox(QStringLiteral("桌宠启动时自动拉起 GPT-SoVITS API"), page);
+        form->addRow(QStringLiteral(""), F->tts_auto_start_api);
+
+        F->tts_base_url = new QLineEdit(page);
+        F->tts_base_url->setPlaceholderText(QStringLiteral("http://127.0.0.1:9880"));
+        form->addRow(QStringLiteral("API 地址"), F->tts_base_url);
+
+        F->tts_install_dir = new QLineEdit(page);
+        F->tts_install_dir->setPlaceholderText(QStringLiteral("例如 C:/GPT-SoVITS-v2pro-20250604（含 api_v2.py）"));
+        form->addRow(QStringLiteral("GPT-SoVITS 安装目录"), F->tts_install_dir);
+
+        F->tts_api_python = new QLineEdit(page);
+        F->tts_api_python->setPlaceholderText(QStringLiteral("留空 → install_dir/runtime/python.exe"));
+        form->addRow(QStringLiteral("API 用 Python"), F->tts_api_python);
+
+        F->tts_bind_host = new QLineEdit(page);
+        form->addRow(QStringLiteral("API 绑定地址"), F->tts_bind_host);
+
+        F->tts_api_config = new QLineEdit(page);
+        form->addRow(QStringLiteral("推理配置 yaml"), F->tts_api_config);
+
+        F->tts_api_start_script = new QLineEdit(page);
+        F->tts_api_start_script->setPlaceholderText(QStringLiteral("可选 pet:/…/start_gptsovits_api.bat，填写则优先于安装目录"));
+        form->addRow(QStringLiteral("启动脚本（可选）"), F->tts_api_start_script);
+
+        F->tts_startup_wait_ms = spinInt(page, 5000, 300000);
+        form->addRow(QStringLiteral("等待 API 就绪(ms)"), F->tts_startup_wait_ms);
+
+        F->tts_ref_audio_path = new QLineEdit(page);
+        F->tts_ref_audio_path->setPlaceholderText(QStringLiteral("pet:/resources/audio/参考音.mp3"));
+        form->addRow(QStringLiteral("参考音频路径"), F->tts_ref_audio_path);
+
+        F->tts_prompt_text = new QPlainTextEdit(page);
+        F->tts_prompt_text->setMinimumHeight(72);
+        F->tts_prompt_text->setPlaceholderText(QStringLiteral("与参考音频内容一致的文字"));
+        form->addRow(QStringLiteral("参考音频文本"), F->tts_prompt_text);
+
+        F->tts_text_lang = new QLineEdit(page);
+        form->addRow(QStringLiteral("合成语言"), F->tts_text_lang);
+
+        F->tts_prompt_lang = new QLineEdit(page);
+        form->addRow(QStringLiteral("参考音频语言"), F->tts_prompt_lang);
+
+        F->tts_max_chars = spinInt(page, 20, 2000);
+        form->addRow(QStringLiteral("单次播报最大字符"), F->tts_max_chars);
+
+        F->tts_strip_parentheses = new QCheckBox(QStringLiteral("播报前去掉括号舞台说明"), page);
+        form->addRow(QStringLiteral(""), F->tts_strip_parentheses);
+
+        F->tts_display_text_after_synthesis =
+            new QCheckBox(QStringLiteral("语音同步模式：合成完成后再开始流式显示文字"), page);
+        form->addRow(QStringLiteral(""), F->tts_display_text_after_synthesis);
+
+        F->tts_script_path = new QLineEdit(page);
+        form->addRow(QStringLiteral("TTS 脚本路径"), F->tts_script_path);
+
+        addPage(QStringLiteral("语音播报"), scroll);
+    }
+
+    /* ---------- 上下文与摘要 ---------- */
+    {
+        auto* scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        auto* page = new QWidget(this);
+        scroll->setWidget(page);
+        auto* lay = new QVBoxLayout(page);
+        lay->addWidget(makeSectionHint(page, QStringLiteral(
+            "不清楚如何填写时：先在下拉里选档位，再点「应用预设到表单」。"
+            "只会填入与上下文/摘要相关的数字，不会改动提供方、模型名与 API Key。"
+            "预设说明：初级≈本机 Llama 3.1 8B；中级≈ Qwen2.5-32B-Instruct；高级≈ DeepSeek V4-Flash。")));
+
+        auto* presetBar = new QWidget(page);
+        auto* presetLay = new QHBoxLayout(presetBar);
+        presetLay->setContentsMargins(0, 0, 0, 0);
+        F->cr_chat_preset = new QComboBox(page);
+        populateChatRuntimePresetCombo(F->cr_chat_preset, m_configPath);
+        F->cr_chat_preset_apply = new QPushButton(QStringLiteral("应用预设到表单"), page);
+        F->cr_chat_preset_apply->setToolTip(QStringLiteral(
+            "把所选档位的建议值写入下方对应输入框；仍需点「保存并应用」才会写入配置文件。"));
+        presetLay->addWidget(F->cr_chat_preset, 1);
+        presetLay->addWidget(F->cr_chat_preset_apply);
+        lay->addWidget(presetBar);
+
+        auto* form = new QFormLayout();
+        lay->addLayout(form);
 
         F->cr_context_turns = spinInt(page, 1, 256);
         form->addRow(QStringLiteral("上下文轮数"), F->cr_context_turns);
@@ -820,21 +1046,6 @@ void SettingsDialog::buildTabs()
         F->cr_chars_per_est_token = spinInt(page, 1, 16);
         form->addRow(QStringLiteral("估算token·每token字符数"), F->cr_chars_per_est_token);
 
-        F->cr_summary_memory_chars = spinInt(page, 0, 500000);
-        form->addRow(QStringLiteral("记忆总字符超则摘要(0仅轮数)"), F->cr_summary_memory_chars);
-
-        F->cr_no_stage_directions = new QCheckBox(QStringLiteral("默认不使用括号舞台/动作描写"), page);
-        form->addRow(QStringLiteral(""), F->cr_no_stage_directions);
-
-        F->cr_pet_persona = new QPlainTextEdit(page);
-        F->cr_pet_persona->setMinimumHeight(140);
-        F->cr_pet_persona->setPlaceholderText(
-            QStringLiteral("留空则使用脚本内置默认人设（与原版相同）。可在此自定义宠物性格与回复规则。"));
-        form->addRow(QStringLiteral("宠物人设"), F->cr_pet_persona);
-
-        F->cr_memory_path = new QLineEdit(page);
-        form->addRow(QStringLiteral("记忆文件路径"), F->cr_memory_path);
-
         F->cr_summary_enabled = new QCheckBox(QStringLiteral("启用会话摘要"), page);
         form->addRow(QStringLiteral(""), F->cr_summary_enabled);
 
@@ -847,6 +1058,9 @@ void SettingsDialog::buildTabs()
         F->cr_summary_max_chars = spinInt(page, 50, 99999);
         form->addRow(QStringLiteral("摘要最大字符"), F->cr_summary_max_chars);
 
+        F->cr_summary_memory_chars = spinInt(page, 0, 500000);
+        form->addRow(QStringLiteral("记忆总字符超则摘要(0仅轮数)"), F->cr_summary_memory_chars);
+
         F->cr_mem_pref = spinInt(page, 16, 99999);
         form->addRow(QStringLiteral("记忆槽·偏好 最大字符"), F->cr_mem_pref);
         F->cr_mem_tasks = spinInt(page, 16, 99999);
@@ -856,7 +1070,7 @@ void SettingsDialog::buildTabs()
         F->cr_mem_facts = spinInt(page, 16, 99999);
         form->addRow(QStringLiteral("记忆槽·事实 最大字符"), F->cr_mem_facts);
 
-        addPage(QStringLiteral("聊天服务"), scroll);
+        addPage(QStringLiteral("上下文与摘要"), scroll);
     }
 
     /* ---------- 聊天记忆（四槽，独立文件） ---------- */
@@ -868,7 +1082,7 @@ void SettingsDialog::buildTabs()
         auto* lay = new QVBoxLayout(page);
         lay->setContentsMargins(8, 8, 8, 8);
         lay->addWidget(makeSectionHint(page, QStringLiteral(
-            "此处编辑 chat_memory.json 中的结构化四槽；文件路径由「聊天服务」页的「记忆文件路径」决定。"
+            "此处编辑 chat_memory.json 中的结构化四槽；文件路径由「推理服务」页的「记忆文件路径」决定。"
             "修改后请按窗口底部「保存并应用」一并写入磁盘。")));
 
         F->cm_path = new QLabel(page);
@@ -898,16 +1112,74 @@ void SettingsDialog::buildTabs()
         form->addRow(QStringLiteral("事实 facts"), F->cm_facts);
         lay->addLayout(form);
 
+        auto* clearChatBtn = new QPushButton(QStringLiteral("清除当前聊天记录"), page);
+        clearChatBtn->setToolTip(QStringLiteral(
+            "清空记忆文件中的对话消息列表，保留上方四槽结构化记忆；运行中的宠物会从磁盘重载记忆并清空聊天窗口气泡。"));
+        lay->addWidget(clearChatBtn);
+        QObject::connect(clearChatBtn, &QPushButton::clicked, this, [this, F]() {
+            const auto ret = QMessageBox::question(
+                this,
+                QStringLiteral("清除聊天记录"),
+                QStringLiteral("确定清空当前对话消息列表吗？\n\n不会删除「偏好 / 任务 / 禁忌 / 事实」四槽内容。"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (ret != QMessageBox::Yes) {
+                return;
+            }
+            if (!clearChatMessagesOnDisk()) {
+                QMessageBox::warning(this,
+                                     QStringLiteral("失败"),
+                                     QStringLiteral("无法写入记忆文件或文件格式无效。"));
+                return;
+            }
+            loadChatMemoryIntoForm(F);
+            emit chatMessagesCleared();
+        });
+
         addPage(QStringLiteral("聊天记忆"), scroll);
     }
 
-    /* ---------- 日志 ---------- */
+    // ======================== 界面与交互 ========================
+    addSection(QStringLiteral("界面与交互"));
+
+    /* ---------- 窗口 ---------- */
     {
         auto* page = new QWidget(this);
         auto* form = new QFormLayout(page);
-        F->log_verbose = new QCheckBox(QStringLiteral("输出详细状态日志（调试）"), page);
-        form->addRow(QStringLiteral(""), F->log_verbose);
-        addPage(QStringLiteral("日志"), page);
+        F->win_width = spinInt(page, 50, 4000);
+        form->addRow(QStringLiteral("窗口宽度（像素）"), F->win_width);
+        F->win_height = spinInt(page, 50, 4000);
+        form->addRow(QStringLiteral("窗口高度（像素）"), F->win_height);
+        addPage(QStringLiteral("窗口"), page);
+    }
+
+    /* ---------- 动画缩放 ---------- */
+    {
+        auto* scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        auto* page = new QWidget(this);
+        scroll->setWidget(page);
+        auto* lay = new QVBoxLayout(page);
+        lay->setContentsMargins(8, 8, 8, 8);
+        lay->addWidget(makeSectionHint(page, QStringLiteral(
+            "各 GIF 在宠物窗口内的相对大小（1.0 占满适配框）。保存并应用后立即生效。"
+            "键与 pet:/resources/animations/ 下相对路径一致；其它 GIF 可在配置文件中 animation_scales 里手写键值。")));
+        auto* form = new QFormLayout();
+        lay->addLayout(form);
+        for (const AnimScaleUiRow& row : kAnimScaleRows) {
+            auto* sp = new QDoubleSpinBox(page);
+            sp->setRange(0.05, 4.0);
+            sp->setDecimals(2);
+            sp->setSingleStep(0.05);
+            sp->setValue(1.0);
+            const QString key = QString::fromUtf8(row.relPath);
+            F->anim_scale_spin.insert(key, sp);
+            form->addRow(QStringLiteral("%1 (%2)")
+                             .arg(QString::fromUtf8(row.labelZh))
+                             .arg(key),
+                         sp);
+        }
+        addPage(QStringLiteral("动画缩放"), scroll);
     }
 
     /* ---------- 移动 ---------- */
@@ -951,71 +1223,16 @@ void SettingsDialog::buildTabs()
         addPage(QStringLiteral("互动"), page);
     }
 
-    /* ---------- 窗口 ---------- */
+    // ======================== 系统 ========================
+    addSection(QStringLiteral("系统"));
+
+    /* ---------- 日志 ---------- */
     {
         auto* page = new QWidget(this);
         auto* form = new QFormLayout(page);
-        F->win_width = spinInt(page, 50, 4000);
-        form->addRow(QStringLiteral("窗口宽度（像素）"), F->win_width);
-        F->win_height = spinInt(page, 50, 4000);
-        form->addRow(QStringLiteral("窗口高度（像素）"), F->win_height);
-        addPage(QStringLiteral("窗口"), page);
-    }
-
-    /* ---------- 动画缩放 ---------- */
-    {
-        auto* scroll = new QScrollArea(this);
-        scroll->setWidgetResizable(true);
-        auto* page = new QWidget(this);
-        scroll->setWidget(page);
-        auto* lay = new QVBoxLayout(page);
-        lay->setContentsMargins(8, 8, 8, 8);
-        lay->addWidget(makeSectionHint(page, QStringLiteral(
-            "各 GIF 在宠物窗口内的相对大小（1.0 占满适配框）。保存并应用后立即生效。"
-            "键与 resources/animations/ 下相对路径一致；其它 GIF 可在配置文件中 animation_scales 里手写键值。")));
-        auto* form = new QFormLayout();
-        lay->addLayout(form);
-        for (const AnimScaleUiRow& row : kAnimScaleRows) {
-            auto* sp = new QDoubleSpinBox(page);
-            sp->setRange(0.05, 4.0);
-            sp->setDecimals(2);
-            sp->setSingleStep(0.05);
-            sp->setValue(1.0);
-            const QString key = QString::fromUtf8(row.relPath);
-            F->anim_scale_spin.insert(key, sp);
-            form->addRow(QStringLiteral("%1 (%2)")
-                             .arg(QString::fromUtf8(row.labelZh))
-                             .arg(key),
-                         sp);
-        }
-        addPage(QStringLiteral("动画缩放"), scroll);
-    }
-
-    /* ---------- 属性上下限 ---------- */
-    {
-        auto* page = new QWidget(this);
-        auto* form = new QFormLayout(page);
-        F->l_max = spinInt(page, 1, 999999);
-        form->addRow(QStringLiteral("属性上限"), F->l_max);
-        F->l_min = spinInt(page, -999999, 999999);
-        form->addRow(QStringLiteral("属性下限"), F->l_min);
-        addPage(QStringLiteral("上下限"), page);
-    }
-
-    /* ---------- 食物 ---------- */
-    {
-        auto* scroll = new QScrollArea(this);
-        scroll->setWidgetResizable(true);
-        F->foodPage = new QWidget(this);
-        scroll->setWidget(F->foodPage);
-        F->foodOuterLayout = new QVBoxLayout(F->foodPage);
-        F->foodOuterLayout->addWidget(makeSectionHint(F->foodPage, QStringLiteral("每种食物对应配置文件中的一个条目；保存后会写入磁盘。")));
-        auto* foodListHost = new QWidget(F->foodPage);
-        F->foodListLayout = new QVBoxLayout(foodListHost);
-        F->foodListLayout->setContentsMargins(0, 0, 0, 0);
-        F->foodOuterLayout->addWidget(foodListHost);
-        F->foodOuterLayout->addStretch();
-        addPage(QStringLiteral("食物"), scroll);
+        F->log_verbose = new QCheckBox(QStringLiteral("输出详细状态日志（调试）"), page);
+        form->addRow(QStringLiteral(""), F->log_verbose);
+        addPage(QStringLiteral("日志"), page);
     }
 
     m_formWidgets = F;
@@ -1023,7 +1240,12 @@ void SettingsDialog::buildTabs()
     connect(F->cr_chat_preset_apply, &QPushButton::clicked, this, &SettingsDialog::onApplyChatRuntimePreset);
 
     if (m_categoryList->count() > 0) {
-        m_categoryList->setCurrentRow(0);
+        for (int i = 0; i < m_categoryList->count(); ++i) {
+            if (m_categoryList->item(i)->flags() & Qt::ItemIsSelectable) {
+                m_categoryList->setCurrentRow(i);
+                break;
+            }
+        }
     }
 }
 
@@ -1191,10 +1413,25 @@ void SettingsDialog::applyRootJson(const QJsonObject& root)
         F->cr_api_base->setText(cr.value(QStringLiteral("api_base")).toString());
         F->cr_api_key->setText(cr.value(QStringLiteral("api_key")).toString());
         F->cr_api_key_env->setText(cr.value(QStringLiteral("api_key_env")).toString());
-        F->cr_model->setText(cr.value(QStringLiteral("model")).toString(QStringLiteral("llama3.1:8b")));
-        F->cr_script_path->setText(cr.value(QStringLiteral("script_path")).toString(QStringLiteral("resources/scripts/chat_ai.py")));
+        {
+            const QString legacyModel = cr.value(QStringLiteral("model")).toString().trimmed();
+            QString ollamaModel = cr.value(QStringLiteral("ollama_model")).toString().trimmed();
+            if (ollamaModel.isEmpty()) {
+                ollamaModel = legacyModel.isEmpty() ? QStringLiteral("llama3.1:8b") : legacyModel;
+            }
+            QString cloudModel = cr.value(QStringLiteral("cloud_model")).toString().trimmed();
+            if (cloudModel.isEmpty()) {
+                cloudModel = legacyModel.isEmpty() ? QStringLiteral("deepseek-chat") : legacyModel;
+            }
+            F->cr_ollama_model->setText(ollamaModel);
+            F->cr_cloud_model->setText(cloudModel);
+        }
+        F->cr_script_path->setText(cr.value(QStringLiteral("script_path")).toString(QStringLiteral("pet:/resources/scripts/chat_ai.py")));
         F->cr_python_path->setText(cr.value(QStringLiteral("python_path")).toString(QStringLiteral("python3")));
         F->cr_ollama_host->setText(cr.value(QStringLiteral("ollama_host")).toString(QStringLiteral("http://127.0.0.1:11434")));
+        F->cr_auto_start_ollama->setChecked(cr.value(QStringLiteral("auto_start_ollama")).toBool(true));
+        F->cr_ollama_executable->setText(cr.value(QStringLiteral("ollama_executable")).toString());
+        F->cr_ollama_startup_wait_ms->setValue(cr.value(QStringLiteral("ollama_startup_wait_ms")).toInt(60000));
         F->cr_context_turns->setValue(cr.value(QStringLiteral("context_turns")).toInt(8));
         F->cr_max_context_chars->setValue(cr.value(QStringLiteral("max_context_chars")).toInt(8000));
         F->cr_max_reply_tokens->setValue(cr.value(QStringLiteral("max_reply_tokens")).toInt(1024));
@@ -1205,7 +1442,7 @@ void SettingsDialog::applyRootJson(const QJsonObject& root)
         F->cr_summary_memory_chars->setValue(cr.value(QStringLiteral("summary_compress_after_memory_chars")).toInt(2800));
         F->cr_no_stage_directions->setChecked(cr.value(QStringLiteral("reply_no_stage_directions")).toBool(true));
         F->cr_pet_persona->setPlainText(cr.value(QStringLiteral("pet_persona")).toString());
-        F->cr_memory_path->setText(cr.value(QStringLiteral("memory_path")).toString(QStringLiteral("resources/save/chat_memory.json")));
+        F->cr_memory_path->setText(cr.value(QStringLiteral("memory_path")).toString(QStringLiteral("pet:/resources/save/chat_memory.json")));
         F->cr_summary_enabled->setChecked(cr.value(QStringLiteral("summary_enabled")).toBool(true));
         F->cr_summary_compress_after->setValue(cr.value(QStringLiteral("summary_compress_after_turns")).toInt(12));
         F->cr_summary_keep_recent->setValue(cr.value(QStringLiteral("summary_keep_recent_turns")).toInt(8));
@@ -1215,6 +1452,31 @@ void SettingsDialog::applyRootJson(const QJsonObject& root)
         F->cr_mem_tasks->setValue(cr.value(QStringLiteral("memory_tasks_max_chars")).toInt(quarter));
         F->cr_mem_avoid->setValue(cr.value(QStringLiteral("memory_avoid_max_chars")).toInt(qMax(24, quarter - 20)));
         F->cr_mem_facts->setValue(cr.value(QStringLiteral("memory_facts_max_chars")).toInt(quarter));
+    }
+
+    QJsonObject tts = nested(root, QStringLiteral("tts_gptsovits"));
+    if (F->tts_enabled) {
+        F->tts_enabled->setChecked(tts.value(QStringLiteral("enabled")).toBool(false));
+        F->tts_auto_start_api->setChecked(tts.value(QStringLiteral("auto_start_api")).toBool(true));
+        F->tts_base_url->setText(tts.value(QStringLiteral("base_url")).toString(QStringLiteral("http://127.0.0.1:9880")));
+        F->tts_install_dir->setText(tts.value(QStringLiteral("install_dir")).toString());
+        F->tts_api_python->setText(tts.value(QStringLiteral("api_python")).toString());
+        F->tts_bind_host->setText(tts.value(QStringLiteral("bind_host")).toString(QStringLiteral("127.0.0.1")));
+        F->tts_api_config->setText(
+            tts.value(QStringLiteral("api_config")).toString(QStringLiteral("GPT_SoVITS/configs/tts_infer.yaml")));
+        F->tts_api_start_script->setText(tts.value(QStringLiteral("api_start_script")).toString());
+        F->tts_startup_wait_ms->setValue(tts.value(QStringLiteral("startup_wait_ms")).toInt(90000));
+        F->tts_ref_audio_path->setText(
+            tts.value(QStringLiteral("ref_audio_path")).toString(QStringLiteral("pet:/resources/audio/东雪莲.mp3")));
+        F->tts_prompt_text->setPlainText(tts.value(QStringLiteral("prompt_text")).toString());
+        F->tts_text_lang->setText(tts.value(QStringLiteral("text_lang")).toString(QStringLiteral("zh")));
+        F->tts_prompt_lang->setText(tts.value(QStringLiteral("prompt_lang")).toString(QStringLiteral("zh")));
+        F->tts_max_chars->setValue(tts.value(QStringLiteral("max_chars")).toInt(300));
+        F->tts_strip_parentheses->setChecked(tts.value(QStringLiteral("strip_parentheses")).toBool(true));
+        F->tts_display_text_after_synthesis->setChecked(
+            tts.value(QStringLiteral("display_text_after_synthesis")).toBool(false));
+        F->tts_script_path->setText(
+            tts.value(QStringLiteral("script_path")).toString(QStringLiteral("pet:/resources/scripts/tts_gptsovits.py")));
     }
 
     QJsonObject lg = nested(root, QStringLiteral("logging"));
@@ -1335,10 +1597,21 @@ QJsonObject SettingsDialog::collectRootJson() const
     cr.insert(QStringLiteral("api_base"), F->cr_api_base->text());
     cr.insert(QStringLiteral("api_key"), F->cr_api_key->text());
     cr.insert(QStringLiteral("api_key_env"), F->cr_api_key_env->text());
-    cr.insert(QStringLiteral("model"), F->cr_model->text());
-    cr.insert(QStringLiteral("script_path"), F->cr_script_path->text());
+    {
+        const QString ollamaModel = F->cr_ollama_model->text().trimmed();
+        const QString cloudModel = F->cr_cloud_model->text().trimmed();
+        cr.insert(QStringLiteral("ollama_model"), ollamaModel);
+        cr.insert(QStringLiteral("cloud_model"), cloudModel);
+        const QString provider = F->cr_provider->currentText().trimmed().toLower();
+        const QString activeModel = (provider == QStringLiteral("ollama")) ? ollamaModel : cloudModel;
+        cr.insert(QStringLiteral("model"), activeModel);
+    }
+    cr.insert(QStringLiteral("script_path"), PetVirtualPath::normalizeConfigurablePath(F->cr_script_path->text()));
     cr.insert(QStringLiteral("python_path"), F->cr_python_path->text());
     cr.insert(QStringLiteral("ollama_host"), F->cr_ollama_host->text());
+    cr.insert(QStringLiteral("auto_start_ollama"), F->cr_auto_start_ollama->isChecked());
+    cr.insert(QStringLiteral("ollama_executable"), F->cr_ollama_executable->text().trimmed());
+    cr.insert(QStringLiteral("ollama_startup_wait_ms"), F->cr_ollama_startup_wait_ms->value());
     cr.insert(QStringLiteral("context_turns"), F->cr_context_turns->value());
     cr.insert(QStringLiteral("max_context_chars"), F->cr_max_context_chars->value());
     cr.insert(QStringLiteral("max_reply_tokens"), F->cr_max_reply_tokens->value());
@@ -1349,7 +1622,7 @@ QJsonObject SettingsDialog::collectRootJson() const
     cr.insert(QStringLiteral("summary_compress_after_memory_chars"), F->cr_summary_memory_chars->value());
     cr.insert(QStringLiteral("reply_no_stage_directions"), F->cr_no_stage_directions->isChecked());
     cr.insert(QStringLiteral("pet_persona"), F->cr_pet_persona->toPlainText());
-    cr.insert(QStringLiteral("memory_path"), F->cr_memory_path->text());
+    cr.insert(QStringLiteral("memory_path"), PetVirtualPath::normalizeConfigurablePath(F->cr_memory_path->text()));
     cr.insert(QStringLiteral("summary_enabled"), F->cr_summary_enabled->isChecked());
     cr.insert(QStringLiteral("summary_compress_after_turns"), F->cr_summary_compress_after->value());
     cr.insert(QStringLiteral("summary_keep_recent_turns"), F->cr_summary_keep_recent->value());
@@ -1359,6 +1632,31 @@ QJsonObject SettingsDialog::collectRootJson() const
     cr.insert(QStringLiteral("memory_avoid_max_chars"), F->cr_mem_avoid->value());
     cr.insert(QStringLiteral("memory_facts_max_chars"), F->cr_mem_facts->value());
     root.insert(QStringLiteral("chat_runtime"), cr);
+
+    QJsonObject tts;
+    if (F->tts_enabled) {
+        tts.insert(QStringLiteral("enabled"), F->tts_enabled->isChecked());
+        tts.insert(QStringLiteral("auto_start_api"), F->tts_auto_start_api->isChecked());
+        tts.insert(QStringLiteral("base_url"), F->tts_base_url->text().trimmed());
+        tts.insert(QStringLiteral("install_dir"), F->tts_install_dir->text().trimmed());
+        tts.insert(QStringLiteral("api_python"), F->tts_api_python->text().trimmed());
+        tts.insert(QStringLiteral("bind_host"), F->tts_bind_host->text().trimmed());
+        tts.insert(QStringLiteral("api_config"), F->tts_api_config->text().trimmed());
+        tts.insert(QStringLiteral("api_start_script"),
+                   PetVirtualPath::normalizeConfigurablePath(F->tts_api_start_script->text()));
+        tts.insert(QStringLiteral("startup_wait_ms"), F->tts_startup_wait_ms->value());
+        tts.insert(QStringLiteral("ref_audio_path"),
+                   PetVirtualPath::normalizeConfigurablePath(F->tts_ref_audio_path->text()));
+        tts.insert(QStringLiteral("prompt_text"), F->tts_prompt_text->toPlainText());
+        tts.insert(QStringLiteral("text_lang"), F->tts_text_lang->text().trimmed());
+        tts.insert(QStringLiteral("prompt_lang"), F->tts_prompt_lang->text().trimmed());
+        tts.insert(QStringLiteral("max_chars"), F->tts_max_chars->value());
+        tts.insert(QStringLiteral("strip_parentheses"), F->tts_strip_parentheses->isChecked());
+        tts.insert(QStringLiteral("display_text_after_synthesis"), F->tts_display_text_after_synthesis->isChecked());
+        tts.insert(QStringLiteral("script_path"),
+                   PetVirtualPath::normalizeConfigurablePath(F->tts_script_path->text()));
+    }
+    root.insert(QStringLiteral("tts_gptsovits"), tts);
 
     QJsonObject lg;
     lg.insert(QStringLiteral("verbose_state_logs"), F->log_verbose->isChecked());
@@ -1468,6 +1766,8 @@ void SettingsDialog::onSave()
         return;
     }
 
+    ensureConfiguredInferenceServicesAfterSettingsSave();
+
     auto* F = static_cast<FormWidgets*>(m_formWidgets);
     if (saveChatMemoryFromForm(F)) {
         emit chatMemoryEdited();
@@ -1534,6 +1834,8 @@ void SettingsDialog::onRestoreDefaults()
         reloadFromDisk();
         return;
     }
+
+    ensureConfiguredInferenceServicesAfterSettingsSave();
 
     reloadFromDisk();
     QMessageBox::information(this, QStringLiteral("设置"), QStringLiteral("已恢复为默认配置并热更新。"));

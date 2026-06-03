@@ -37,12 +37,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>5.14.2_msvc2017_64</QtInstall>
-    <QtModules>core;gui;multimedia;widgets;multimediawidgets;sql;concurrent</QtModules>
+    <QtModules>core;gui;multimedia;widgets;multimediawidgets;network;sql;concurrent</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>5.14.2_msvc2017_64</QtInstall>
-    <QtModules>core;sql;concurrent</QtModules>
+    <QtModules>core;gui;multimedia;widgets;multimediawidgets;network;sql;concurrent</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -122,12 +122,16 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Core\main.cpp" />
+    <ClCompile Include="Core\PetGptsovitsLauncher.cpp" />
+    <ClCompile Include="Core\PetOllamaLauncher.cpp" />
+    <ClCompile Include="Core\PetInferenceServices.cpp" />
     <ClCompile Include="Core\PetAttribute.cpp" />
     <ClCompile Include="Core\PetFSM.cpp" />
     <ClCompile Include="Core\PetState.cpp" />
     <ClCompile Include="Core\PetDatabase.cpp" />
     <ClCompile Include="Core\PetController.cpp" />
     <ClCompile Include="Config\PetConfig.cpp" />
+    <ClCompile Include="Config\PetVirtualPath.cpp" />
     <ClCompile Include="Widget\PetWidget.cpp" />
     <ClCompile Include="Widget\PetMenuWidget.cpp" />
     <ClCompile Include="Widget\SettingsDialog.cpp" />

@@ -1,6 +1,7 @@
 #pragma execution_character_set("utf-8")
 
 #include "PetConfig.h"
+#include "PetVirtualPath.h"
 #include <QFileInfo>
 
 PetConfig* PetConfig::m_instance = nullptr;
@@ -179,6 +180,7 @@ bool PetConfig::loadConfig(const QString& path) {
 
     // 读取聊天运行时配置
     applyChatRuntimeObject(getNestedObj(rootObj, "chat_runtime"));
+    applyTtsGptsovitsObject(getNestedObj(rootObj, QStringLiteral("tts_gptsovits")));
 
     // 读取日志配置
     QJsonObject loggingObj = getNestedObj(rootObj, "logging");
@@ -248,16 +250,42 @@ bool PetConfig::loadConfig(const QString& path) {
     return true;
 }
 
+QString PetConfig::getChatModel() const
+{
+    if (m_chatProvider == QStringLiteral("ollama")) {
+        return m_chatOllamaModel;
+    }
+    return m_chatCloudModel;
+}
+
 void PetConfig::applyChatRuntimeObject(const QJsonObject& chatRuntimeObj)
 {
     m_chatProvider = chatRuntimeObj.value("provider").toString("ollama").trimmed().toLower();
     m_chatApiBase = chatRuntimeObj.value("api_base").toString("").trimmed();
     m_chatApiKey = chatRuntimeObj.value("api_key").toString("").trimmed();
     m_chatApiKeyEnv = chatRuntimeObj.value("api_key_env").toString("").trimmed();
-    m_chatModel = chatRuntimeObj.value("model").toString("llama3.1:8b");
-    m_chatScriptPath = chatRuntimeObj.value("script_path").toString("resources/scripts/chat_ai.py");
+    const QString legacyModel = chatRuntimeObj.value(QStringLiteral("model")).toString().trimmed();
+    m_chatOllamaModel = chatRuntimeObj.value(QStringLiteral("ollama_model")).toString().trimmed();
+    if (m_chatOllamaModel.isEmpty()) {
+        m_chatOllamaModel = legacyModel.isEmpty() ? QStringLiteral("llama3.1:8b") : legacyModel;
+    }
+    m_chatCloudModel = chatRuntimeObj.value(QStringLiteral("cloud_model")).toString().trimmed();
+    if (m_chatCloudModel.isEmpty()) {
+        m_chatCloudModel = legacyModel.isEmpty() ? QStringLiteral("deepseek-chat") : legacyModel;
+    }
+    m_chatScriptPath = PetVirtualPath::normalizeConfigurablePath(
+        chatRuntimeObj.value(QStringLiteral("script_path")).toString(QStringLiteral("pet:/resources/scripts/chat_ai.py")));
     m_pythonPath = chatRuntimeObj.value("python_path").toString("python3");
     m_chatOllamaHost = chatRuntimeObj.value("ollama_host").toString("http://127.0.0.1:11434");
+    m_chatAutoStartOllama = chatRuntimeObj.value(QStringLiteral("auto_start_ollama")).toBool(true);
+    m_chatOllamaExecutable = chatRuntimeObj.value(QStringLiteral("ollama_executable")).toString().trimmed();
+    m_chatOllamaStartupWaitMs = chatRuntimeObj.value(QStringLiteral("ollama_startup_wait_ms")).toInt(60000);
+    if (m_chatOllamaStartupWaitMs < 3000) {
+        m_chatOllamaStartupWaitMs = 3000;
+    }
+    if (m_chatOllamaStartupWaitMs > 300000) {
+        m_chatOllamaStartupWaitMs = 300000;
+    }
     m_chatPetPersona = chatRuntimeObj.value("pet_persona").toString();
     m_chatContextTurns = chatRuntimeObj.value("context_turns").toInt(8);
     m_chatMaxContextChars = chatRuntimeObj.value("max_context_chars").toInt(8000);
@@ -304,7 +332,8 @@ void PetConfig::applyChatRuntimeObject(const QJsonObject& chatRuntimeObj)
         m_chatSummaryCompressAfterMemoryChars = 500000;
     }
     m_chatReplyNoStageDirections = chatRuntimeObj.value("reply_no_stage_directions").toBool(true);
-    m_chatMemoryPath = chatRuntimeObj.value("memory_path").toString("resources/save/chat_memory.json");
+    m_chatMemoryPath = PetVirtualPath::normalizeConfigurablePath(
+        chatRuntimeObj.value(QStringLiteral("memory_path")).toString(QStringLiteral("pet:/resources/save/chat_memory.json")));
     m_chatSummaryEnabled = chatRuntimeObj.value("summary_enabled").toBool(true);
     m_chatSummaryCompressAfterTurns = chatRuntimeObj.value("summary_compress_after_turns").toInt(12);
     m_chatSummaryKeepRecentTurns = chatRuntimeObj.value("summary_keep_recent_turns").toInt(8);
@@ -330,6 +359,61 @@ void PetConfig::applyChatRuntimeObject(const QJsonObject& chatRuntimeObj)
     }
     if (m_chatSummaryCompressAfterTurns < m_chatSummaryKeepRecentTurns + 1) {
         m_chatSummaryCompressAfterTurns = m_chatSummaryKeepRecentTurns + 2;
+    }
+}
+
+void PetConfig::applyTtsGptsovitsObject(const QJsonObject& ttsObj)
+{
+    if (ttsObj.isEmpty()) {
+        return;
+    }
+    m_ttsGptsovitsEnabled = ttsObj.value(QStringLiteral("enabled")).toBool(false);
+    m_ttsGptsovitsBaseUrl = ttsObj.value(QStringLiteral("base_url"))
+                                .toString(QStringLiteral("http://127.0.0.1:9880"))
+                                .trimmed();
+    if (m_ttsGptsovitsBaseUrl.isEmpty()) {
+        m_ttsGptsovitsBaseUrl = QStringLiteral("http://127.0.0.1:9880");
+    }
+    m_ttsGptsovitsRefAudioPath = PetVirtualPath::normalizeConfigurablePath(
+        ttsObj.value(QStringLiteral("ref_audio_path"))
+            .toString(QStringLiteral("pet:/resources/audio/东雪莲.mp3")));
+    m_ttsGptsovitsPromptText = ttsObj.value(QStringLiteral("prompt_text")).toString();
+    m_ttsGptsovitsTextLang = ttsObj.value(QStringLiteral("text_lang")).toString(QStringLiteral("zh")).trimmed();
+    if (m_ttsGptsovitsTextLang.isEmpty()) {
+        m_ttsGptsovitsTextLang = QStringLiteral("zh");
+    }
+    m_ttsGptsovitsPromptLang = ttsObj.value(QStringLiteral("prompt_lang")).toString(QStringLiteral("zh")).trimmed();
+    if (m_ttsGptsovitsPromptLang.isEmpty()) {
+        m_ttsGptsovitsPromptLang = QStringLiteral("zh");
+    }
+    m_ttsGptsovitsMaxChars = ttsObj.value(QStringLiteral("max_chars")).toInt(300);
+    if (m_ttsGptsovitsMaxChars < 20) {
+        m_ttsGptsovitsMaxChars = 20;
+    }
+    if (m_ttsGptsovitsMaxChars > 2000) {
+        m_ttsGptsovitsMaxChars = 2000;
+    }
+    m_ttsGptsovitsStripParentheses = ttsObj.value(QStringLiteral("strip_parentheses")).toBool(true);
+    m_ttsDisplayTextAfterSynthesis = ttsObj.value(QStringLiteral("display_text_after_synthesis")).toBool(false);
+    m_ttsGptsovitsScriptPath = PetVirtualPath::normalizeConfigurablePath(
+        ttsObj.value(QStringLiteral("script_path"))
+            .toString(QStringLiteral("pet:/resources/scripts/tts_gptsovits.py")));
+    m_ttsGptsovitsAutoStartApi = ttsObj.value(QStringLiteral("auto_start_api")).toBool(true);
+    m_ttsGptsovitsInstallDir = ttsObj.value(QStringLiteral("install_dir")).toString().trimmed();
+    m_ttsGptsovitsApiPython = ttsObj.value(QStringLiteral("api_python")).toString().trimmed();
+    m_ttsGptsovitsApiConfig = ttsObj.value(QStringLiteral("api_config"))
+                                  .toString(QStringLiteral("GPT_SoVITS/configs/tts_infer.yaml"))
+                                  .trimmed();
+    m_ttsGptsovitsBindHost =
+        ttsObj.value(QStringLiteral("bind_host")).toString(QStringLiteral("127.0.0.1")).trimmed();
+    m_ttsGptsovitsApiStartScript = PetVirtualPath::normalizeConfigurablePath(
+        ttsObj.value(QStringLiteral("api_start_script")).toString());
+    m_ttsGptsovitsStartupWaitMs = ttsObj.value(QStringLiteral("startup_wait_ms")).toInt(90000);
+    if (m_ttsGptsovitsStartupWaitMs < 5000) {
+        m_ttsGptsovitsStartupWaitMs = 5000;
+    }
+    if (m_ttsGptsovitsStartupWaitMs > 300000) {
+        m_ttsGptsovitsStartupWaitMs = 300000;
     }
 }
 

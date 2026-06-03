@@ -435,9 +435,9 @@ void PetMenuWidget::onSubMenuAction(const QString& action)
         hideSubMenu();
     }
     else if (action == u8"退出") {
-        if (m_controller) m_controller->handleMenuAction(action);
         hide();
         hideSubMenu();
+        emit applicationQuitRequested();
     }
 }
 
